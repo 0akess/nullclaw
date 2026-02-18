@@ -23,13 +23,20 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Cache .zig-cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-${{ hashFiles('src/**/*.zig', 'build.zig') }}
+          restore-keys: zig-${{ matrix.os }}-
+
       - name: Install SQLite (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y libsqlite3-dev
 
       - name: Install SQLite (macOS)
         if: runner.os == 'macOS'
-        run: brew install sqlite
+        run: brew list sqlite &>/dev/null || brew install sqlite
 
       - name: Run tests (Linux)
         if: runner.os == 'Linux'
@@ -38,11 +45,11 @@ jobs:
           SQLITE_LIB=$(pkg-config --variable=libdir sqlite3)
           zig build test --summary all \
             -Dsqlite-include="$SQLITE_INC" \
-            -Dsqlite-lib="$SQLITE_LIB"
+            -Dsqlite-lib="$SQLITE_LIB" 2>&1 | tee test-output.txt
 
       - name: Run tests (macOS)
         if: runner.os == 'macOS'
-        run: zig build test --summary all
+        run: zig build test --summary all 2>&1 | tee test-output.txt
 
       - name: Build ReleaseSmall (Linux)
         if: runner.os == 'Linux'
@@ -56,3 +63,31 @@ jobs:
       - name: Build ReleaseSmall (macOS)
         if: runner.os == 'macOS'
         run: zig build -Doptimize=ReleaseSmall
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## nullClaw CI — ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f test-output.txt ]; then
+            TESTS=$(grep -o '[0-9]*/[0-9]* tests passed' test-output.txt | head -1 || true)
+            RSS=$(grep 'run test' test-output.txt | grep -o 'MaxRSS:[^ ]*' | head -1 | cut -d: -f2 || true)
+            echo "| Tests | ${TESTS:-—} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Test MaxRSS | ${RSS:-—} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f zig-out/bin/nullclaw ]; then
+            SIZE=$(wc -c < zig-out/bin/nullclaw | tr -d ' ')
+            SIZE_HR=$(awk "BEGIN {printf \"%.1f MB\", $SIZE / 1048576}")
+            echo "| Binary (ReleaseSmall) | ${SIZE_HR} (${SIZE} bytes) |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nullclaw-${{ matrix.os == 'ubuntu-latest' && 'linux-x86_64' || 'macos-aarch64' }}
+          path: zig-out/bin/nullclaw
