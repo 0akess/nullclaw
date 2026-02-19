@@ -40,7 +40,7 @@ pub const ChannelMessage = struct {
         allocator.free(self.id);
         allocator.free(self.sender);
         allocator.free(self.content);
-        allocator.free(self.channel);
+        // channel is a string literal or long-lived config pointer — not owned, don't free
         if (self.reply_target) |rt| allocator.free(rt);
         if (self.first_name) |fn_| allocator.free(fn_);
     }

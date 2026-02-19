@@ -25,7 +25,7 @@ pub const InboundMessage = struct {
         for (self.media) |m| allocator.free(m);
         if (self.media.len > 0) allocator.free(self.media);
         if (self.metadata_json) |md| allocator.free(md);
-        allocator.free(self.channel);
+        // channel is a string literal or long-lived config pointer — not owned, don't free
         allocator.free(self.sender_id);
         allocator.free(self.chat_id);
         allocator.free(self.content);
@@ -42,7 +42,7 @@ pub const OutboundMessage = struct {
     pub fn deinit(self: *const OutboundMessage, allocator: Allocator) void {
         for (self.media) |m| allocator.free(m);
         if (self.media.len > 0) allocator.free(self.media);
-        allocator.free(self.channel);
+        // channel is a string literal or long-lived config pointer — not owned, don't free
         allocator.free(self.chat_id);
         allocator.free(self.content);
     }
@@ -60,8 +60,7 @@ pub fn makeInbound(
     content: []const u8,
     session_key: []const u8,
 ) Allocator.Error!InboundMessage {
-    const ch = try allocator.dupe(u8, channel);
-    errdefer allocator.free(ch);
+    // channel is not duped — must be a literal or long-lived config pointer
     const sid = try allocator.dupe(u8, sender_id);
     errdefer allocator.free(sid);
     const cid = try allocator.dupe(u8, chat_id);
@@ -71,7 +70,7 @@ pub fn makeInbound(
     const sk = try allocator.dupe(u8, session_key);
 
     return .{
-        .channel = ch,
+        .channel = channel,
         .sender_id = sid,
         .chat_id = cid,
         .content = ct,
@@ -90,8 +89,7 @@ pub fn makeInboundFull(
     media_src: []const []const u8,
     metadata_json: ?[]const u8,
 ) Allocator.Error!InboundMessage {
-    const ch = try allocator.dupe(u8, channel);
-    errdefer allocator.free(ch);
+    // channel is not duped — must be a literal or long-lived config pointer
     const sid = try allocator.dupe(u8, sender_id);
     errdefer allocator.free(sid);
     const cid = try allocator.dupe(u8, chat_id);
@@ -118,7 +116,7 @@ pub fn makeInboundFull(
     const md = if (metadata_json) |mj| try allocator.dupe(u8, mj) else null;
 
     return .{
-        .channel = ch,
+        .channel = channel,
         .sender_id = sid,
         .chat_id = cid,
         .content = ct,
@@ -134,14 +132,13 @@ pub fn makeOutbound(
     chat_id: []const u8,
     content: []const u8,
 ) Allocator.Error!OutboundMessage {
-    const ch = try allocator.dupe(u8, channel);
-    errdefer allocator.free(ch);
+    // channel is not duped — must be a literal or long-lived config pointer
     const cid = try allocator.dupe(u8, chat_id);
     errdefer allocator.free(cid);
     const ct = try allocator.dupe(u8, content);
 
     return .{
-        .channel = ch,
+        .channel = channel,
         .chat_id = cid,
         .content = ct,
     };
@@ -155,8 +152,7 @@ pub fn makeOutboundWithMedia(
     content: []const u8,
     media_src: []const []const u8,
 ) Allocator.Error!OutboundMessage {
-    const ch = try allocator.dupe(u8, channel);
-    errdefer allocator.free(ch);
+    // channel is not duped — must be a literal or long-lived config pointer
     const cid = try allocator.dupe(u8, chat_id);
     errdefer allocator.free(cid);
     const ct = try allocator.dupe(u8, content);
@@ -176,7 +172,7 @@ pub fn makeOutboundWithMedia(
     } else &[_][]const u8{};
 
     return .{
-        .channel = ch,
+        .channel = channel,
         .chat_id = cid,
         .content = ct,
         .media = media,
@@ -329,16 +325,17 @@ test "OutboundMessage.deinit frees all fields" {
     msg.deinit(alloc);
 }
 
-test "makeInbound produces owned copies" {
+test "makeInbound produces owned copies of non-channel fields" {
     const alloc = testing.allocator;
-    var src_channel = try alloc.dupe(u8, "webhook");
-    defer alloc.free(src_channel);
+    var src_content = try alloc.dupe(u8, "body");
+    defer alloc.free(src_content);
 
-    const msg = try makeInbound(alloc, src_channel, "s", "c", "body", "webhook:c");
+    const msg = try makeInbound(alloc, "webhook", "s", "c", src_content, "webhook:c");
     defer msg.deinit(alloc);
 
-    // Mutate source — message must be unaffected
-    src_channel[0] = 'X';
+    // Mutate source — message must be unaffected (channel is borrowed, not duped)
+    src_content[0] = 'X';
+    try testing.expectEqualStrings("body", msg.content);
     try testing.expectEqualStrings("webhook", msg.channel);
 }
 

@@ -598,9 +598,12 @@ pub const OtelObserver = struct {
         const url_buf = std.fmt.allocPrint(self.allocator, "{s}/v1/traces", .{self.endpoint}) catch return;
         defer self.allocator.free(url_buf);
 
-        _ = http_util.curlPost(self.allocator, url_buf, payload, &.{}) catch {};
+        // Best-effort send; free response if successful
+        if (http_util.curlPost(self.allocator, url_buf, payload, &.{})) |curl_resp| {
+            self.allocator.free(curl_resp);
+        } else |_| {}
 
-        // Clear flushed spans
+        // Clear spans regardless of delivery success to prevent unbounded growth
         for (self.spans.items) |*span| {
             span.deinit(self.allocator);
         }

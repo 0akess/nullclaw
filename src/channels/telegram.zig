@@ -417,7 +417,8 @@ pub const TelegramChannel = struct {
         }
         try body_list.appendSlice(self.allocator, "}");
 
-        _ = try root.http_util.curlPost(self.allocator, url, body_list.items, &.{});
+        const resp = try root.http_util.curlPost(self.allocator, url, body_list.items, &.{});
+        self.allocator.free(resp);
     }
 
     // ── Media sending ───────────────────────────────────────────────
@@ -580,7 +581,8 @@ pub const TelegramChannel = struct {
         try root.json_util.appendJsonString(&body_list, self.allocator, text);
         try body_list.appendSlice(self.allocator, "}");
 
-        _ = try root.http_util.curlPost(self.allocator, url, body_list.items, &.{});
+        const resp = try root.http_util.curlPost(self.allocator, url, body_list.items, &.{});
+        self.allocator.free(resp);
     }
 
     /// Poll for updates using long-polling (getUpdates) via curl.
@@ -598,6 +600,7 @@ pub const TelegramChannel = struct {
         const body = fbs.getWritten();
 
         const resp_body = try root.http_util.curlPost(allocator, url, body, &.{});
+        defer allocator.free(resp_body);
 
         // Parse JSON response to extract messages
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, resp_body, .{}) catch return &.{};
