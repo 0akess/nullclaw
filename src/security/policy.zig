@@ -54,6 +54,9 @@ const high_risk_commands = [_][]const u8{
     "netcat",   "scp",          "ssh",    "ftp",      "telnet",
 };
 
+/// Maximum command bytes analyzed by security policy checks.
+const MAX_COMMAND_ANALYSIS_BYTES: usize = 4096;
+
 /// Default allowed commands
 pub const default_allowed_commands = [_][]const u8{
     "git", "npm", "cargo", "ls", "cat", "grep", "find", "echo", "pwd", "wc", "head", "tail",
@@ -83,8 +86,11 @@ pub const SecurityPolicy = struct {
     /// Classify command risk level.
     pub fn commandRiskLevel(self: *const SecurityPolicy, command: []const u8) CommandRiskLevel {
         _ = self;
+        // Fail closed: commands longer than the analysis cap are treated as high risk.
+        if (command.len > MAX_COMMAND_ANALYSIS_BYTES) return .high;
+
         // Normalize separators to null bytes for segment splitting
-        var normalized: [4096]u8 = undefined;
+        var normalized: [MAX_COMMAND_ANALYSIS_BYTES]u8 = undefined;
         const norm_len = normalizeCommand(command, &normalized);
         const norm = normalized[0..norm_len];
 
@@ -160,6 +166,9 @@ pub const SecurityPolicy = struct {
     pub fn isCommandAllowed(self: *const SecurityPolicy, command: []const u8) bool {
         if (self.autonomy == .read_only) return false;
 
+        // Explicitly reject oversized commands to avoid partial-prefix analysis.
+        if (command.len > MAX_COMMAND_ANALYSIS_BYTES) return false;
+
         // Block subshell/expansion operators
         if (containsStr(command, "`") or containsStr(command, "$(") or containsStr(command, "${")) {
             return false;
@@ -186,7 +195,7 @@ pub const SecurityPolicy = struct {
         // Block output redirections
         if (std.mem.indexOfScalar(u8, command, '>') != null) return false;
 
-        var normalized: [4096]u8 = undefined;
+        var normalized: [MAX_COMMAND_ANALYSIS_BYTES]u8 = undefined;
         const norm_len = normalizeCommand(command, &normalized);
         const norm = normalized[0..norm_len];
 
@@ -491,7 +500,7 @@ fn containsStr(haystack: []const u8, needle: []const u8) bool {
 
 /// Fixed-size buffer for lowercase conversion
 const LowerResult = struct {
-    buf: [4096]u8 = undefined,
+    buf: [MAX_COMMAND_ANALYSIS_BYTES]u8 = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const LowerResult) []const u8 {
@@ -514,6 +523,19 @@ fn toLowerSlice(s: []const u8, buf: []u8) []const u8 {
         buf[i] = std.ascii.toLower(c);
     }
     return buf[0..len];
+}
+
+fn oversizedCommandWithDangerousTail(buf: []u8) []const u8 {
+    const prefix = "echo ";
+    const tail = " && rm -rf /";
+    const total_len = MAX_COMMAND_ANALYSIS_BYTES + tail.len;
+    std.debug.assert(buf.len >= total_len);
+
+    @memcpy(buf[0..prefix.len], prefix);
+    @memset(buf[prefix.len..MAX_COMMAND_ANALYSIS_BYTES], 'a');
+    @memcpy(buf[MAX_COMMAND_ANALYSIS_BYTES..][0..tail.len], tail);
+
+    return buf[0..total_len];
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -642,6 +664,29 @@ test "command newline injection blocked" {
     const p = SecurityPolicy{};
     try std.testing.expect(!p.isCommandAllowed("ls\nrm -rf /"));
     try std.testing.expect(p.isCommandAllowed("ls\necho hello"));
+}
+
+test "oversized command with dangerous tail is rejected" {
+    const p = SecurityPolicy{};
+    var cmd_buf: [MAX_COMMAND_ANALYSIS_BYTES + " && rm -rf /".len]u8 = undefined;
+    const cmd = oversizedCommandWithDangerousTail(&cmd_buf);
+    try std.testing.expect(cmd.len > MAX_COMMAND_ANALYSIS_BYTES);
+    try std.testing.expect(!p.isCommandAllowed(cmd));
+}
+
+test "oversized command with dangerous tail is high risk" {
+    const p = SecurityPolicy{};
+    var cmd_buf: [MAX_COMMAND_ANALYSIS_BYTES + " && rm -rf /".len]u8 = undefined;
+    const cmd = oversizedCommandWithDangerousTail(&cmd_buf);
+    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(cmd));
+}
+
+test "validate command rejects oversized command" {
+    const p = SecurityPolicy{};
+    var cmd_buf: [MAX_COMMAND_ANALYSIS_BYTES + " && rm -rf /".len]u8 = undefined;
+    const cmd = oversizedCommandWithDangerousTail(&cmd_buf);
+    const result = p.validateCommandExecution(cmd, false);
+    try std.testing.expectError(error.CommandNotAllowed, result);
 }
 
 test "command risk low for read commands" {
