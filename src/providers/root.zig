@@ -85,11 +85,13 @@ pub const Role = enum {
     }
 
     pub fn fromSlice(s: []const u8) ?Role {
-        if (std.mem.eql(u8, s, "system")) return .system;
-        if (std.mem.eql(u8, s, "user")) return .user;
-        if (std.mem.eql(u8, s, "assistant")) return .assistant;
-        if (std.mem.eql(u8, s, "tool")) return .tool;
-        return null;
+        const map = std.StaticStringMap(Role).initComptime(.{
+            .{ "system", .system },
+            .{ "user", .user },
+            .{ "assistant", .assistant },
+            .{ "tool", .tool },
+        });
+        return map.get(s);
     }
 };
 
@@ -633,25 +635,36 @@ pub fn resolveApiKey(
 }
 
 fn providerEnvCandidates(name: []const u8) [3][]const u8 {
-    if (std.mem.eql(u8, name, "anthropic")) return .{ "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "" };
-    if (std.mem.eql(u8, name, "openrouter")) return .{ "OPENROUTER_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "openai")) return .{ "OPENAI_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "gemini") or std.mem.eql(u8, name, "google") or std.mem.eql(u8, name, "google-gemini")) return .{ "GEMINI_API_KEY", "GOOGLE_API_KEY", "" };
-    if (std.mem.eql(u8, name, "groq")) return .{ "GROQ_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "mistral")) return .{ "MISTRAL_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "deepseek")) return .{ "DEEPSEEK_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "xai") or std.mem.eql(u8, name, "grok")) return .{ "XAI_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "together") or std.mem.eql(u8, name, "together-ai")) return .{ "TOGETHER_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "fireworks") or std.mem.eql(u8, name, "fireworks-ai")) return .{ "FIREWORKS_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "perplexity")) return .{ "PERPLEXITY_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "cohere")) return .{ "COHERE_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "venice")) return .{ "VENICE_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "poe")) return .{ "POE_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "moonshot") or std.mem.eql(u8, name, "kimi")) return .{ "MOONSHOT_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "nvidia") or std.mem.eql(u8, name, "nvidia-nim") or std.mem.eql(u8, name, "build.nvidia.com")) return .{ "NVIDIA_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "astrai")) return .{ "ASTRAI_API_KEY", "", "" };
-    if (std.mem.eql(u8, name, "lmstudio") or std.mem.eql(u8, name, "lm-studio")) return .{ "", "", "" };
-    return .{ "", "", "" };
+    const map = std.StaticStringMap([3][]const u8).initComptime(.{
+        .{ "anthropic", .{ "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "" } },
+        .{ "openrouter", .{ "OPENROUTER_API_KEY", "", "" } },
+        .{ "openai", .{ "OPENAI_API_KEY", "", "" } },
+        .{ "gemini", .{ "GEMINI_API_KEY", "GOOGLE_API_KEY", "" } },
+        .{ "google", .{ "GEMINI_API_KEY", "GOOGLE_API_KEY", "" } },
+        .{ "google-gemini", .{ "GEMINI_API_KEY", "GOOGLE_API_KEY", "" } },
+        .{ "groq", .{ "GROQ_API_KEY", "", "" } },
+        .{ "mistral", .{ "MISTRAL_API_KEY", "", "" } },
+        .{ "deepseek", .{ "DEEPSEEK_API_KEY", "", "" } },
+        .{ "xai", .{ "XAI_API_KEY", "", "" } },
+        .{ "grok", .{ "XAI_API_KEY", "", "" } },
+        .{ "together", .{ "TOGETHER_API_KEY", "", "" } },
+        .{ "together-ai", .{ "TOGETHER_API_KEY", "", "" } },
+        .{ "fireworks", .{ "FIREWORKS_API_KEY", "", "" } },
+        .{ "fireworks-ai", .{ "FIREWORKS_API_KEY", "", "" } },
+        .{ "perplexity", .{ "PERPLEXITY_API_KEY", "", "" } },
+        .{ "cohere", .{ "COHERE_API_KEY", "", "" } },
+        .{ "venice", .{ "VENICE_API_KEY", "", "" } },
+        .{ "poe", .{ "POE_API_KEY", "", "" } },
+        .{ "moonshot", .{ "MOONSHOT_API_KEY", "", "" } },
+        .{ "kimi", .{ "MOONSHOT_API_KEY", "", "" } },
+        .{ "nvidia", .{ "NVIDIA_API_KEY", "", "" } },
+        .{ "nvidia-nim", .{ "NVIDIA_API_KEY", "", "" } },
+        .{ "build.nvidia.com", .{ "NVIDIA_API_KEY", "", "" } },
+        .{ "astrai", .{ "ASTRAI_API_KEY", "", "" } },
+        .{ "lmstudio", .{ "", "", "" } },
+        .{ "lm-studio", .{ "", "", "" } },
+    });
+    return map.get(name) orelse .{ "", "", "" };
 }
 
 /// Resolve API key with config providers as first priority:
@@ -879,6 +892,88 @@ pub fn compatibleProviderDisplayName(name: []const u8) []const u8 {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ProviderHolder — centralized tagged union for provider lifetime management
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Tagged union so the concrete provider struct lives alongside the caller
+/// (stack or heap) and its vtable pointer remains stable.
+pub const ProviderHolder = union(enum) {
+    openrouter: openrouter.OpenRouterProvider,
+    anthropic: anthropic.AnthropicProvider,
+    openai: openai.OpenAiProvider,
+    gemini: gemini.GeminiProvider,
+    ollama: ollama.OllamaProvider,
+    compatible: compatible.OpenAiCompatibleProvider,
+    claude_cli: claude_cli.ClaudeCliProvider,
+    codex_cli: codex_cli.CodexCliProvider,
+    openai_codex: openai_codex.OpenAiCodexProvider,
+
+    /// Obtain the vtable-based Provider interface from whichever variant is active.
+    pub fn provider(self: *ProviderHolder) Provider {
+        return switch (self.*) {
+            .openrouter => |*p| p.provider(),
+            .anthropic => |*p| p.provider(),
+            .openai => |*p| p.provider(),
+            .gemini => |*p| p.provider(),
+            .ollama => |*p| p.provider(),
+            .compatible => |*p| p.provider(),
+            .claude_cli => |*p| p.provider(),
+            .codex_cli => |*p| p.provider(),
+            .openai_codex => |*p| p.provider(),
+        };
+    }
+
+    /// Release any resources owned by the active provider variant.
+    pub fn deinit(self: *ProviderHolder) void {
+        self.provider().deinit();
+    }
+
+    /// Create a ProviderHolder from a provider name string and optional API key.
+    /// Uses `classifyProvider` to route to the correct concrete provider.
+    pub fn fromConfig(
+        allocator: std.mem.Allocator,
+        provider_name: []const u8,
+        api_key: ?[]const u8,
+    ) ProviderHolder {
+        const kind = classifyProvider(provider_name);
+        return switch (kind) {
+            .anthropic_provider => .{ .anthropic = anthropic.AnthropicProvider.init(
+                allocator,
+                api_key,
+                if (std.mem.startsWith(u8, provider_name, "anthropic-custom:"))
+                    provider_name["anthropic-custom:".len..]
+                else
+                    null,
+            ) },
+            .openai_provider => .{ .openai = openai.OpenAiProvider.init(allocator, api_key) },
+            .gemini_provider => .{ .gemini = gemini.GeminiProvider.init(allocator, api_key) },
+            .ollama_provider => .{ .ollama = ollama.OllamaProvider.init(allocator, null) },
+            .openrouter_provider => .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },
+            .compatible_provider => .{ .compatible = compatible.OpenAiCompatibleProvider.init(
+                allocator,
+                provider_name,
+                if (std.mem.startsWith(u8, provider_name, "custom:"))
+                    provider_name["custom:".len..]
+                else
+                    compatibleProviderUrl(provider_name) orelse "https://openrouter.ai/api/v1",
+                api_key,
+                .bearer,
+            ) },
+            .claude_cli_provider => if (claude_cli.ClaudeCliProvider.init(allocator, null)) |p|
+                .{ .claude_cli = p }
+            else |_|
+                .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },
+            .codex_cli_provider => if (codex_cli.CodexCliProvider.init(allocator, null)) |p|
+                .{ .codex_cli = p }
+            else |_|
+                .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },
+            .openai_codex_provider => .{ .openai_codex = openai_codex.OpenAiCodexProvider.init(allocator, null) },
+            .unknown => .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },
+        };
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════════════
 // High-level complete function (legacy compatibility)
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -903,8 +998,8 @@ pub fn complete(allocator: std.mem.Allocator, cfg: anytype, prompt: []const u8) 
     const body_str = try buildRequestBody(allocator, model, prompt, cfg.temperature, cfg.max_tokens orelse 4096);
     defer allocator.free(body_str);
 
-    const auth_val = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
-    defer allocator.free(auth_val);
+    var auth_buf: [512]u8 = undefined;
+    const auth_val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch return error.NoApiKey;
 
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
@@ -938,8 +1033,8 @@ pub fn completeWithSystem(allocator: std.mem.Allocator, cfg: anytype, system_pro
     const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, cfg.temperature, max_tok);
     defer allocator.free(body_str);
 
-    const auth_val = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
-    defer allocator.free(auth_val);
+    var auth_buf: [512]u8 = undefined;
+    const auth_val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch return error.NoApiKey;
 
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
@@ -1905,6 +2000,58 @@ test "resolveApiKeyFromConfig returns null for missing provider" {
     // which may or may not find a key — we just test it doesn't crash
     const result = try resolveApiKeyFromConfig(std.testing.allocator, "nonexistent", &entries);
     if (result) |r| std.testing.allocator.free(r);
+}
+
+test "ProviderHolder tagged union has all expected fields" {
+    try std.testing.expect(@hasField(ProviderHolder, "openrouter"));
+    try std.testing.expect(@hasField(ProviderHolder, "anthropic"));
+    try std.testing.expect(@hasField(ProviderHolder, "openai"));
+    try std.testing.expect(@hasField(ProviderHolder, "gemini"));
+    try std.testing.expect(@hasField(ProviderHolder, "ollama"));
+    try std.testing.expect(@hasField(ProviderHolder, "compatible"));
+    try std.testing.expect(@hasField(ProviderHolder, "claude_cli"));
+    try std.testing.expect(@hasField(ProviderHolder, "codex_cli"));
+    try std.testing.expect(@hasField(ProviderHolder, "openai_codex"));
+}
+
+test "ProviderHolder.fromConfig routes to correct variant" {
+    const alloc = std.testing.allocator;
+    // anthropic
+    var h1 = ProviderHolder.fromConfig(alloc, "anthropic", "sk-test");
+    defer h1.deinit();
+    try std.testing.expect(h1 == .anthropic);
+    // openai
+    var h2 = ProviderHolder.fromConfig(alloc, "openai", "sk-test");
+    defer h2.deinit();
+    try std.testing.expect(h2 == .openai);
+    // gemini
+    var h3 = ProviderHolder.fromConfig(alloc, "gemini", "key");
+    defer h3.deinit();
+    try std.testing.expect(h3 == .gemini);
+    // ollama
+    var h4 = ProviderHolder.fromConfig(alloc, "ollama", null);
+    defer h4.deinit();
+    try std.testing.expect(h4 == .ollama);
+    // openrouter
+    var h5 = ProviderHolder.fromConfig(alloc, "openrouter", "sk-or-test");
+    defer h5.deinit();
+    try std.testing.expect(h5 == .openrouter);
+    // compatible (groq)
+    var h6 = ProviderHolder.fromConfig(alloc, "groq", "gsk_test");
+    defer h6.deinit();
+    try std.testing.expect(h6 == .compatible);
+    // openai-codex
+    var h7 = ProviderHolder.fromConfig(alloc, "openai-codex", null);
+    defer h7.deinit();
+    try std.testing.expect(h7 == .openai_codex);
+    // unknown falls back to openrouter
+    var h8 = ProviderHolder.fromConfig(alloc, "nonexistent", "key");
+    defer h8.deinit();
+    try std.testing.expect(h8 == .openrouter);
+    // anthropic-custom prefix
+    var h9 = ProviderHolder.fromConfig(alloc, "anthropic-custom:https://my-api.example.com", "sk-test");
+    defer h9.deinit();
+    try std.testing.expect(h9 == .anthropic);
 }
 
 test {

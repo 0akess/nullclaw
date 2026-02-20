@@ -88,17 +88,15 @@ pub const GitTool = struct {
 
     /// Returns true for operations that modify the repository.
     fn requiresWriteAccess(operation: []const u8) bool {
-        const write_ops = [_][]const u8{
-            "commit",   "push",  "merge", "rebase", "reset",
-            "checkout", "add",   "rm",    "mv",     "tag",
-            "branch",   "clean",
-        };
-        for (write_ops) |op| {
-            if (std.mem.eql(u8, operation, op)) return true;
-        }
-        // "stash push" is write, but we check at the stash level
-        if (std.mem.eql(u8, operation, "stash")) return true;
-        return false;
+        const write_ops = std.StaticStringMap(void).initComptime(.{
+            .{ "commit", {} }, .{ "push", {} },   .{ "merge", {} },
+            .{ "rebase", {} }, .{ "reset", {} },  .{ "checkout", {} },
+            .{ "add", {} },    .{ "rm", {} },     .{ "mv", {} },
+            .{ "tag", {} },    .{ "branch", {} }, .{ "clean", {} },
+            // "stash push" is write, but we check at the stash level
+            .{ "stash", {} },
+        });
+        return write_ops.has(operation);
     }
 
     pub fn execute(self: *GitTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
@@ -132,14 +130,28 @@ pub const GitTool = struct {
             break :blk cwd;
         } else self.workspace_dir;
 
-        if (std.mem.eql(u8, operation, "status")) return self.runGitOp(allocator, effective_cwd, &.{ "status", "--porcelain=2", "--branch" });
-        if (std.mem.eql(u8, operation, "diff")) return self.gitDiff(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "log")) return self.gitLog(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "branch")) return self.runGitOp(allocator, effective_cwd, &.{ "branch", "--format=%(refname:short)|%(HEAD)" });
-        if (std.mem.eql(u8, operation, "commit")) return self.gitCommit(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "add")) return self.gitAdd(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "checkout")) return self.gitCheckout(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "stash")) return self.gitStash(allocator, effective_cwd, args);
+        const GitOp = enum { status, diff, log, branch, commit, add, checkout, stash };
+        const op_map = std.StaticStringMap(GitOp).initComptime(.{
+            .{ "status", .status },
+            .{ "diff", .diff },
+            .{ "log", .log },
+            .{ "branch", .branch },
+            .{ "commit", .commit },
+            .{ "add", .add },
+            .{ "checkout", .checkout },
+            .{ "stash", .stash },
+        });
+
+        if (op_map.get(operation)) |op| return switch (op) {
+            .status => self.runGitOp(allocator, effective_cwd, &.{ "status", "--porcelain=2", "--branch" }),
+            .diff => self.gitDiff(allocator, effective_cwd, args),
+            .log => self.gitLog(allocator, effective_cwd, args),
+            .branch => self.runGitOp(allocator, effective_cwd, &.{ "branch", "--format=%(refname:short)|%(HEAD)" }),
+            .commit => self.gitCommit(allocator, effective_cwd, args),
+            .add => self.gitAdd(allocator, effective_cwd, args),
+            .checkout => self.gitCheckout(allocator, effective_cwd, args),
+            .stash => self.gitStash(allocator, effective_cwd, args),
+        };
 
         const msg = try std.fmt.allocPrint(allocator, "Unknown operation: {s}", .{operation});
         return ToolResult{ .success = false, .output = "", .error_msg = msg };

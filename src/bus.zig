@@ -113,6 +113,13 @@ pub fn makeInboundFull(
         break :blk arr;
     } else &[_][]const u8{};
 
+    errdefer {
+        if (media.len > 0) {
+            for (media) |m| allocator.free(m);
+            allocator.free(media);
+        }
+    }
+
     const md = if (metadata_json) |mj| try allocator.dupe(u8, mj) else null;
 
     return .{
