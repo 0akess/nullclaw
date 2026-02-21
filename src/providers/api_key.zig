@@ -91,26 +91,21 @@ fn providerEnvCandidates(name: []const u8) [3][]const u8 {
     return map.get(name) orelse .{ "", "", "" };
 }
 
-/// Resolve API key with config providers as first priority.
-/// If allow_env is true, also falls back to environment variables:
+/// Resolve API key with config providers as first priority, then env vars:
 ///   1. providers[].api_key from config
-///   2. Provider-specific env var (GROQ_API_KEY, etc.) - only if allow_env
-///   3. Generic fallbacks (NULLCLAW_API_KEY, API_KEY) - only if allow_env
+///   2. Provider-specific env var (GROQ_API_KEY, etc.)
+///   3. Generic fallbacks (NULLCLAW_API_KEY, API_KEY)
 pub fn resolveApiKeyFromConfig(
     allocator: std.mem.Allocator,
     provider_name: []const u8,
     providers: []const config_mod.ProviderEntry,
-    allow_env: bool,
 ) !?[]u8 {
     for (providers) |e| {
         if (std.mem.eql(u8, e.name, provider_name)) {
             if (e.api_key) |k| return try allocator.dupe(u8, k);
         }
     }
-    if (allow_env) {
-        return resolveApiKey(allocator, provider_name, null);
-    }
-    return null;
+    return resolveApiKey(allocator, provider_name, null);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -140,16 +135,16 @@ test "resolveApiKeyFromConfig finds key from providers" {
         .{ .name = "openrouter", .api_key = "sk-or-test" },
         .{ .name = "groq", .api_key = "gsk_test" },
     };
-    const result = try resolveApiKeyFromConfig(std.testing.allocator, "groq", &entries, false);
+    const result = try resolveApiKeyFromConfig(std.testing.allocator, "groq", &entries);
     defer if (result) |r| std.testing.allocator.free(r);
     try std.testing.expectEqualStrings("gsk_test", result.?);
 }
 
-test "resolveApiKeyFromConfig returns null for missing provider" {
+test "resolveApiKeyFromConfig falls through to env for missing provider" {
     const entries = [_]config_mod.ProviderEntry{
         .{ .name = "openrouter", .api_key = "sk-or-test" },
     };
-    // Without allow_env, returns null for missing provider (no env fallback)
-    const result = try resolveApiKeyFromConfig(std.testing.allocator, "nonexistent", &entries, false);
-    try std.testing.expect(result == null);
+    // Falls through to env-based resolution (may or may not find a key)
+    const result = try resolveApiKeyFromConfig(std.testing.allocator, "nonexistent", &entries);
+    if (result) |r| std.testing.allocator.free(r);
 }
