@@ -47,7 +47,39 @@ pub const FileWriteTool = struct {
         };
         defer allocator.free(full_path);
 
-        // Ensure parent directory exists
+        const ws_resolved: ?[]const u8 = std.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch null;
+        defer if (ws_resolved) |wr| allocator.free(wr);
+        const ws_path = ws_resolved orelse "";
+
+        // Resolve and validate before any filesystem writes so symlink targets
+        // and disallowed absolute destinations are rejected without side effects.
+        const resolved_target: ?[]const u8 = std.fs.cwd().realpathAlloc(allocator, full_path) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => {
+                const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            },
+        };
+        defer if (resolved_target) |rt| allocator.free(rt);
+
+        if (resolved_target) |resolved| {
+            if (!isResolvedPathAllowed(allocator, resolved, ws_path, self.allowed_paths)) {
+                return ToolResult.fail("Path is outside allowed areas");
+            }
+        } else {
+            const parent_to_check = std.fs.path.dirname(full_path) orelse full_path;
+            const resolved_ancestor = resolveNearestExistingAncestor(allocator, parent_to_check) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
+            defer allocator.free(resolved_ancestor);
+
+            if (!isResolvedPathAllowed(allocator, resolved_ancestor, ws_path, self.allowed_paths)) {
+                return ToolResult.fail("Path is outside allowed areas");
+            }
+        }
+
+        // Ensure parent directory exists after policy checks pass.
         if (std.fs.path.dirname(full_path)) |parent| {
             std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
@@ -58,20 +90,6 @@ pub const FileWriteTool = struct {
                     };
                 },
             };
-
-            // Resolve parent to validate against policy
-            const resolved_parent = std.fs.cwd().realpathAlloc(allocator, parent) catch |err| {
-                const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
-                return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            };
-            defer allocator.free(resolved_parent);
-
-            const ws_resolved: ?[]const u8 = std.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch null;
-            defer if (ws_resolved) |wr| allocator.free(wr);
-
-            if (!isResolvedPathAllowed(allocator, resolved_parent, ws_resolved orelse "", self.allowed_paths)) {
-                return ToolResult.fail("Path is outside allowed areas");
-            }
         }
 
         // Write file
@@ -86,10 +104,36 @@ pub const FileWriteTool = struct {
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
 
+        const final_resolved = std.fs.cwd().realpathAlloc(allocator, full_path) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        };
+        defer allocator.free(final_resolved);
+
+        if (!isResolvedPathAllowed(allocator, final_resolved, ws_path, self.allowed_paths)) {
+            if (std.fs.path.isAbsolute(full_path)) {
+                std.fs.deleteFileAbsolute(full_path) catch {};
+            } else {
+                std.fs.cwd().deleteFile(full_path) catch {};
+            }
+            return ToolResult.fail("Path is outside allowed areas");
+        }
+
         const msg = try std.fmt.allocPrint(allocator, "Written {d} bytes to {s}", .{ content.len, path });
         return ToolResult{ .success = true, .output = msg };
     }
 };
+
+fn resolveNearestExistingAncestor(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+        error.FileNotFound => {
+            const parent = std.fs.path.dirname(path) orelse return err;
+            if (std.mem.eql(u8, parent, path)) return err;
+            return resolveNearestExistingAncestor(allocator, parent);
+        },
+        else => return err,
+    };
+}
 
 // ── Tests ───────────────────────────────────────────────────────────
 
@@ -230,4 +274,76 @@ test "file_write empty content" {
 
     try std.testing.expect(result.success);
     try std.testing.expect(std.mem.indexOf(u8, result.output, "0 bytes") != null);
+}
+
+test "file_write blocks symlink target escape outside workspace" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var ws_tmp = std.testing.tmpDir(.{});
+    defer ws_tmp.cleanup();
+    var outside_tmp = std.testing.tmpDir(.{});
+    defer outside_tmp.cleanup();
+
+    const ws_path = try ws_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+    const outside_path = try outside_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(outside_path);
+
+    try outside_tmp.dir.writeFile(.{ .sub_path = "outside.txt", .data = "safe" });
+    const outside_file = try std.fs.path.join(std.testing.allocator, &.{ outside_path, "outside.txt" });
+    defer std.testing.allocator.free(outside_file);
+
+    try ws_tmp.dir.symLink(outside_file, "escape.txt", .{});
+
+    var ft = FileWriteTool{ .workspace_dir = ws_path };
+    const t = ft.tool();
+    const parsed = try root.parseTestArgs("{\"path\": \"escape.txt\", \"content\": \"pwned\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "outside allowed areas") != null);
+
+    const outside_actual = try outside_tmp.dir.readFileAlloc(std.testing.allocator, "outside.txt", 1024);
+    defer std.testing.allocator.free(outside_actual);
+    try std.testing.expectEqualStrings("safe", outside_actual);
+}
+
+test "file_write rejects disallowed absolute path without creating parent directories" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var ws_tmp = std.testing.tmpDir(.{});
+    defer ws_tmp.cleanup();
+    var outside_tmp = std.testing.tmpDir(.{});
+    defer outside_tmp.cleanup();
+
+    const ws_path = try ws_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+    const outside_path = try outside_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(outside_path);
+
+    const outside_parent = try std.fs.path.join(std.testing.allocator, &.{ outside_path, "created_by_rejected_write" });
+    defer std.testing.allocator.free(outside_parent);
+    const outside_file = try std.fs.path.join(std.testing.allocator, &.{ outside_parent, "note.txt" });
+    defer std.testing.allocator.free(outside_file);
+
+    const json_args = try std.fmt.allocPrint(std.testing.allocator, "{{\"path\": \"{s}\", \"content\": \"x\"}}", .{outside_file});
+    defer std.testing.allocator.free(json_args);
+
+    var ft = FileWriteTool{ .workspace_dir = ws_path, .allowed_paths = &.{ws_path} };
+    const t = ft.tool();
+    const parsed = try root.parseTestArgs(json_args);
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "outside allowed areas") != null);
+
+    const dir_exists = blk: {
+        var d = std.fs.openDirAbsolute(outside_parent, .{}) catch |err| switch (err) {
+            error.FileNotFound => break :blk false,
+            else => return err,
+        };
+        d.close();
+        break :blk true;
+    };
+    try std.testing.expect(!dir_exists);
 }
