@@ -35,6 +35,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 const log = std.log.scoped(.signal);
 
@@ -81,6 +82,7 @@ pub const RecipientTarget = union(enum) {
 /// dispatch loop calling `pollMessages()`.
 pub const SignalChannel = struct {
     allocator: std.mem.Allocator,
+    account_id: []const u8 = "default",
     /// Base URL of the signal-cli daemon (e.g. "http://127.0.0.1:8080").
     /// Trailing slashes are stripped on init.
     http_url: []const u8,
@@ -117,6 +119,21 @@ pub const SignalChannel = struct {
             .ignore_attachments = ignore_attachments,
             .ignore_stories = ignore_stories,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.SignalConfig) SignalChannel {
+        var ch = init(
+            allocator,
+            cfg.http_url,
+            cfg.account,
+            cfg.allow_from,
+            cfg.group_allow_from,
+            cfg.ignore_attachments,
+            cfg.ignore_stories,
+        );
+        ch.account_id = cfg.account_id;
+        ch.group_policy = cfg.group_policy;
+        return ch;
     }
 
     pub fn channelName(_: *const SignalChannel) []const u8 {

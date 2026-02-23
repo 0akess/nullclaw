@@ -26,26 +26,35 @@ pub const ChannelMeta = struct {
     key: []const u8,
     label: []const u8,
     configured_message: []const u8,
+    listener_mode: ListenerMode,
+};
+
+pub const ListenerMode = enum {
+    none,
+    polling,
+    gateway_loop,
+    webhook_only,
+    send_only,
 };
 
 pub const known_channels = [_]ChannelMeta{
-    .{ .id = .cli, .key = "cli", .label = "CLI", .configured_message = "CLI enabled" },
-    .{ .id = .telegram, .key = "telegram", .label = "Telegram", .configured_message = "Telegram configured" },
-    .{ .id = .discord, .key = "discord", .label = "Discord", .configured_message = "Discord configured" },
-    .{ .id = .slack, .key = "slack", .label = "Slack", .configured_message = "Slack configured" },
-    .{ .id = .webhook, .key = "webhook", .label = "Webhook", .configured_message = "Webhook configured" },
-    .{ .id = .imessage, .key = "imessage", .label = "iMessage", .configured_message = "iMessage configured" },
-    .{ .id = .matrix, .key = "matrix", .label = "Matrix", .configured_message = "Matrix configured" },
-    .{ .id = .whatsapp, .key = "whatsapp", .label = "WhatsApp", .configured_message = "WhatsApp configured" },
-    .{ .id = .irc, .key = "irc", .label = "IRC", .configured_message = "IRC configured" },
-    .{ .id = .lark, .key = "lark", .label = "Lark", .configured_message = "Lark configured" },
-    .{ .id = .dingtalk, .key = "dingtalk", .label = "DingTalk", .configured_message = "DingTalk configured" },
-    .{ .id = .signal, .key = "signal", .label = "Signal", .configured_message = "Signal configured" },
-    .{ .id = .email, .key = "email", .label = "Email", .configured_message = "Email configured" },
-    .{ .id = .line, .key = "line", .label = "Line", .configured_message = "Line configured" },
-    .{ .id = .qq, .key = "qq", .label = "QQ", .configured_message = "QQ configured" },
-    .{ .id = .onebot, .key = "onebot", .label = "OneBot", .configured_message = "OneBot configured" },
-    .{ .id = .maixcam, .key = "maixcam", .label = "MaixCam", .configured_message = "MaixCam configured" },
+    .{ .id = .cli, .key = "cli", .label = "CLI", .configured_message = "CLI enabled", .listener_mode = .none },
+    .{ .id = .telegram, .key = "telegram", .label = "Telegram", .configured_message = "Telegram configured", .listener_mode = .polling },
+    .{ .id = .discord, .key = "discord", .label = "Discord", .configured_message = "Discord configured", .listener_mode = .gateway_loop },
+    .{ .id = .slack, .key = "slack", .label = "Slack", .configured_message = "Slack configured", .listener_mode = .send_only },
+    .{ .id = .webhook, .key = "webhook", .label = "Webhook", .configured_message = "Webhook configured", .listener_mode = .none },
+    .{ .id = .imessage, .key = "imessage", .label = "iMessage", .configured_message = "iMessage configured", .listener_mode = .send_only },
+    .{ .id = .matrix, .key = "matrix", .label = "Matrix", .configured_message = "Matrix configured", .listener_mode = .send_only },
+    .{ .id = .whatsapp, .key = "whatsapp", .label = "WhatsApp", .configured_message = "WhatsApp configured", .listener_mode = .webhook_only },
+    .{ .id = .irc, .key = "irc", .label = "IRC", .configured_message = "IRC configured", .listener_mode = .send_only },
+    .{ .id = .lark, .key = "lark", .label = "Lark", .configured_message = "Lark configured", .listener_mode = .webhook_only },
+    .{ .id = .dingtalk, .key = "dingtalk", .label = "DingTalk", .configured_message = "DingTalk configured", .listener_mode = .send_only },
+    .{ .id = .signal, .key = "signal", .label = "Signal", .configured_message = "Signal configured", .listener_mode = .polling },
+    .{ .id = .email, .key = "email", .label = "Email", .configured_message = "Email configured", .listener_mode = .send_only },
+    .{ .id = .line, .key = "line", .label = "Line", .configured_message = "Line configured", .listener_mode = .webhook_only },
+    .{ .id = .qq, .key = "qq", .label = "QQ", .configured_message = "QQ configured", .listener_mode = .gateway_loop },
+    .{ .id = .onebot, .key = "onebot", .label = "OneBot", .configured_message = "OneBot configured", .listener_mode = .gateway_loop },
+    .{ .id = .maixcam, .key = "maixcam", .label = "MaixCam", .configured_message = "MaixCam configured", .listener_mode = .send_only },
 };
 
 pub fn configuredCount(cfg: *const Config, channel_id: ChannelId) usize {
@@ -100,9 +109,15 @@ pub fn hasAnyConfigured(cfg: *const Config, include_cli: bool) bool {
 }
 
 pub fn contributesToDaemonSupervision(channel_id: ChannelId) bool {
-    return switch (channel_id) {
-        .cli, .webhook => false,
-        else => true,
+    const meta = findById(channel_id) orelse return false;
+    return meta.listener_mode != .none;
+}
+
+pub fn requiresRuntime(channel_id: ChannelId) bool {
+    const meta = findById(channel_id) orelse return false;
+    return switch (meta.listener_mode) {
+        .polling, .gateway_loop, .webhook_only => true,
+        .send_only, .none => false,
     };
 }
 
@@ -114,11 +129,24 @@ pub fn hasSupervisedChannels(cfg: *const Config) bool {
     return false;
 }
 
+pub fn hasRuntimeDependentChannels(cfg: *const Config) bool {
+    for (known_channels) |meta| {
+        if (!requiresRuntime(meta.id)) continue;
+        if (isConfigured(cfg, meta.id)) return true;
+    }
+    return false;
+}
+
 pub fn isChannelStartSupported(channel_id: ChannelId) bool {
-    return switch (channel_id) {
-        .telegram, .signal, .discord, .qq, .onebot => true,
-        else => false,
-    };
+    const meta = findById(channel_id) orelse return false;
+    return meta.listener_mode != .none and channel_id != .webhook;
+}
+
+pub fn findById(channel_id: ChannelId) ?ChannelMeta {
+    for (known_channels) |meta| {
+        if (meta.id == channel_id) return meta;
+    }
+    return null;
 }
 
 test "configuredCount handles array and optional channels" {
@@ -176,6 +204,34 @@ test "hasSupervisedChannels excludes webhook and cli" {
         },
     };
     try std.testing.expect(hasSupervisedChannels(&cfg_signal));
+}
+
+test "hasRuntimeDependentChannels includes inbound listeners only" {
+    const cfg_send_only = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+        .channels = .{
+            .slack = &[_]@import("config_types.zig").SlackConfig{
+                .{ .account_id = "main", .bot_token = "tok", .app_token = "app" },
+            },
+        },
+    };
+    try std.testing.expect(!hasRuntimeDependentChannels(&cfg_send_only));
+
+    const cfg_webhook = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+        .channels = .{
+            .line = .{
+                .account_id = "line-main",
+                .access_token = "tok",
+                .channel_secret = "sec",
+            },
+        },
+    };
+    try std.testing.expect(hasRuntimeDependentChannels(&cfg_webhook));
 }
 
 test "findByKey finds known channels" {

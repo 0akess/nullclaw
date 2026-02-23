@@ -13,6 +13,10 @@ pub const EmailChannel = struct {
         return .{ .allocator = allocator, .config = config, .reply_message_ids = .empty };
     }
 
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.EmailConfig) EmailChannel {
+        return init(allocator, cfg);
+    }
+
     pub fn deinit(self: *EmailChannel) void {
         var it = self.reply_message_ids.iterator();
         while (it.next()) |entry| {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 /// Matrix channel — uses the Client-Server API with long-polling /sync.
 pub const MatrixChannel = struct {
@@ -29,6 +30,16 @@ pub const MatrixChannel = struct {
             .room_id = room_id,
             .allow_from = allow_from,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.MatrixConfig) MatrixChannel {
+        return init(
+            allocator,
+            cfg.homeserver,
+            cfg.access_token,
+            cfg.room_id,
+            cfg.allow_from,
+        );
     }
 
     pub fn channelName(_: *MatrixChannel) []const u8 {

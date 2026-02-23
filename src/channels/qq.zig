@@ -258,6 +258,10 @@ pub const QQChannel = struct {
         };
     }
 
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.QQConfig) QQChannel {
+        return init(allocator, cfg);
+    }
+
     pub fn channelName(_: *QQChannel) []const u8 {
         return "qq";
     }

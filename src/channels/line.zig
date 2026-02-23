@@ -25,6 +25,10 @@ pub const LineChannel = struct {
         };
     }
 
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.LineConfig) LineChannel {
+        return init(allocator, cfg);
+    }
+
     pub fn channelName(_: *LineChannel) []const u8 {
         return "line";
     }
@@ -237,7 +241,12 @@ pub const LineChannel = struct {
             self.allocator.free(events);
             return &.{};
         }
-        return events[0..kept];
+
+        // Re-own into a right-sized allocation to preserve correct free() length.
+        const out = try self.allocator.alloc(LineEvent, kept);
+        @memcpy(out, events[0..kept]);
+        self.allocator.free(events);
+        return out;
     }
 
     // ── Channel vtable ──────────────────────────────────────────────
@@ -917,6 +926,31 @@ test "line parseAndFilterEvents permits listed user" {
 
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("Hello", events[0].message_text.?);
+}
+
+test "line parseAndFilterEvents mixed allowlist keeps only allowed events" {
+    const allocator = std.testing.allocator;
+    var ch = LineChannel.init(allocator, .{
+        .access_token = "tok",
+        .channel_secret = "sec",
+        .allow_from = &.{"Uallow"},
+    });
+
+    const payload =
+        \\{"events":[{"type":"message","replyToken":"tok1","source":{"type":"user","userId":"Uallow"},"timestamp":1700000000000,"message":{"id":"m1","type":"text","text":"A"}},{"type":"message","replyToken":"tok2","source":{"type":"user","userId":"Ublock"},"timestamp":1700000000000,"message":{"id":"m2","type":"text","text":"B"}}]}
+    ;
+
+    const events = try ch.parseAndFilterEvents(payload);
+    defer {
+        for (events) |*e| {
+            var ev = e.*;
+            ev.deinit(allocator);
+        }
+        allocator.free(events);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqualStrings("A", events[0].message_text.?);
 }
 
 test "line parseAndFilterEvents empty allow_from passes all" {

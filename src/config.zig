@@ -1473,6 +1473,20 @@ test "parse discord accounts" {
     allocator.free(cfg.channels.discord);
 }
 
+test "parse discord mention_only alias maps to require_mention" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"channels": {"discord": {"accounts": {"main": {"token": "disc-tok", "mention_only": true}}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.discord.len);
+    try std.testing.expect(cfg.channels.discord[0].require_mention);
+    allocator.free(cfg.channels.discord[0].account_id);
+    allocator.free(cfg.channels.discord[0].token);
+    allocator.free(cfg.channels.discord);
+}
+
 test "parse slack accounts" {
     const allocator = std.testing.allocator;
     const json =
@@ -1644,6 +1658,20 @@ test "parse onebot multi-account sorted alphabetically" {
     try std.testing.expectEqualStrings("ws://east.local:6700", cfg.channels.onebot[0].url);
     try std.testing.expectEqualStrings("/bot", cfg.channels.onebot[0].group_trigger_prefix.?);
     try std.testing.expectEqualStrings("west", cfg.channels.onebot[1].account_id);
+}
+
+test "parse onebot account_id in payload is overridden by account key" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{"channels": {"onebot": {"accounts": {"edge": {"account_id": "wrong", "url": "ws://edge.local:6700"}}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.onebot.len);
+    try std.testing.expectEqualStrings("edge", cfg.channels.onebot[0].account_id);
+    try std.testing.expectEqualStrings("ws://edge.local:6700", cfg.channels.onebot[0].url);
 }
 
 test "parse maixcam multi-account sorted with custom names" {

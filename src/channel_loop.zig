@@ -166,8 +166,6 @@ pub fn runTelegramLoop(
     loop_state: *TelegramLoopState,
     tg_ptr: *telegram.TelegramChannel,
 ) void {
-    const telegram_config = config.channels.telegramPrimary() orelse return;
-
     // Set up transcription — key comes from providers.{audio_media.provider}
     const trans = config.audio_media;
     if (config.getProviderKey(trans.provider)) |key| {
@@ -219,7 +217,7 @@ pub fn runTelegramLoop(
             }
 
             // Reply-to logic
-            const use_reply_to = msg.is_group or telegram_config.reply_in_private;
+            const use_reply_to = msg.is_group or tg_ptr.reply_in_private;
             const reply_to_id: ?i64 = if (use_reply_to) msg.message_id else null;
 
             // Session key — always resolve through agent routing (falls back on errors)
@@ -227,11 +225,11 @@ pub fn runTelegramLoop(
             var routed_session_key: ?[]const u8 = null;
             defer if (routed_session_key) |key| allocator.free(key);
             const session_key = blk: {
-                const route = agent_routing.resolveRoute(allocator, .{
+                const route = agent_routing.resolveRouteWithSession(allocator, .{
                     .channel = "telegram",
-                    .account_id = telegram_config.account_id,
+                    .account_id = tg_ptr.account_id,
                     .peer = .{ .kind = if (msg.is_group) .group else .direct, .id = msg.sender },
-                }, config.agent_bindings, config.agents) catch break :blk std.fmt.bufPrint(&key_buf, "telegram:{s}", .{msg.sender}) catch msg.sender;
+                }, config.agent_bindings, config.agents, config.session) catch break :blk std.fmt.bufPrint(&key_buf, "telegram:{s}", .{msg.sender}) catch msg.sender;
                 allocator.free(route.main_session_key);
                 routed_session_key = route.session_key;
                 break :blk route.session_key;
@@ -312,31 +310,8 @@ pub fn runSignalLoop(
     config: *const Config,
     runtime: *ChannelRuntime,
     loop_state: *SignalLoopState,
+    sg_ptr: *signal.SignalChannel,
 ) void {
-    const signal_config = config.channels.signalPrimary() orelse return;
-
-    // Env overrides for Signal
-    const env_http_url = std.process.getEnvVarOwned(allocator, "SIGNAL_HTTP_URL") catch null;
-    defer if (env_http_url) |v| allocator.free(v);
-    const env_account = std.process.getEnvVarOwned(allocator, "SIGNAL_ACCOUNT") catch null;
-    defer if (env_account) |v| allocator.free(v);
-    const effective_http_url = env_http_url orelse signal_config.http_url;
-    const effective_account = env_account orelse signal_config.account;
-
-    // Heap-alloc SignalChannel for vtable pointer stability
-    const sg_ptr = allocator.create(signal.SignalChannel) catch return;
-    defer allocator.destroy(sg_ptr);
-    sg_ptr.* = signal.SignalChannel.init(
-        allocator,
-        effective_http_url,
-        effective_account,
-        signal_config.allow_from,
-        signal_config.group_allow_from,
-        signal_config.ignore_attachments,
-        signal_config.ignore_stories,
-    );
-    sg_ptr.group_policy = signal_config.group_policy;
-
     // Update activity timestamp at start
     loop_state.last_activity.store(std.time.timestamp(), .release);
 
@@ -360,14 +335,14 @@ pub fn runSignalLoop(
             var routed_session_key: ?[]const u8 = null;
             defer if (routed_session_key) |key| allocator.free(key);
             const session_key = blk: {
-                const route = agent_routing.resolveRoute(allocator, .{
+                const route = agent_routing.resolveRouteWithSession(allocator, .{
                     .channel = "signal",
-                    .account_id = signal_config.account_id,
+                    .account_id = sg_ptr.account_id,
                     .peer = .{
                         .kind = if (msg.is_group) .group else .direct,
                         .id = if (msg.is_group) group_peer_id else msg.sender,
                     },
-                }, config.agent_bindings, config.agents) catch break :blk if (msg.is_group)
+                }, config.agent_bindings, config.agents, config.session) catch break :blk if (msg.is_group)
                     std.fmt.bufPrint(&key_buf, "signal:group:{s}:{s}", .{
                         group_peer_id,
                         msg.sender,

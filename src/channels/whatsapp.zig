@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 /// WhatsApp channel — uses WhatsApp Business Cloud API.
 /// Operates in webhook mode (push-based); messages received via gateway endpoint.
@@ -32,6 +33,18 @@ pub const WhatsAppChannel = struct {
             .group_allow_from = group_allow_from,
             .group_policy = group_policy,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.WhatsAppConfig) WhatsAppChannel {
+        return init(
+            allocator,
+            cfg.access_token,
+            cfg.phone_number_id,
+            cfg.verify_token,
+            cfg.allow_from,
+            cfg.group_allow_from,
+            cfg.group_policy,
+        );
     }
 
     pub fn channelName(_: *WhatsAppChannel) []const u8 {
@@ -353,6 +366,18 @@ test "whatsapp parse empty payload" {
     const nums = [_][]const u8{"*"};
     const ch = WhatsAppChannel.init(allocator, "tok", "123", "ver", &nums, &.{}, "allowlist");
     const msgs = try ch.parseWebhookPayload(allocator, "{}");
+    defer allocator.free(msgs);
+    try std.testing.expectEqual(@as(usize, 0), msgs.len);
+}
+
+test "whatsapp parse invalid shapes returns empty" {
+    const allocator = std.testing.allocator;
+    const nums = [_][]const u8{"*"};
+    const ch = WhatsAppChannel.init(allocator, "tok", "123", "ver", &nums, &.{}, "allowlist");
+    const payload =
+        \\{"entry":[{"changes":[{"value":{"messages":[{"from":42,"text":"oops"}]}}]}]}
+    ;
+    const msgs = try ch.parseWebhookPayload(allocator, payload);
     defer allocator.free(msgs);
     try std.testing.expectEqual(@as(usize, 0), msgs.len);
 }

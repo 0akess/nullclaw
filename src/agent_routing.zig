@@ -377,6 +377,31 @@ pub fn resolveRoute(
     return buildRoute(allocator, default_id, input, .default);
 }
 
+/// Resolve a route and build session keys using configured session scope settings.
+/// Applies dm_scope and identity_links to the returned session_key.
+pub fn resolveRouteWithSession(
+    allocator: std.mem.Allocator,
+    input: RouteInput,
+    bindings: []const AgentBinding,
+    agents: []const NamedAgentConfig,
+    session: config_types.SessionConfig,
+) !ResolvedRoute {
+    var route = try resolveRoute(allocator, input, bindings, agents);
+    errdefer allocator.free(route.main_session_key);
+
+    allocator.free(route.session_key);
+    route.session_key = try buildSessionKeyWithScope(
+        allocator,
+        route.agent_id,
+        input.channel,
+        input.peer,
+        session.dm_scope,
+        input.account_id,
+        session.identity_links,
+    );
+    return route;
+}
+
 /// Internal helper to construct a ResolvedRoute with allocated session keys.
 fn buildRoute(
     allocator: std.mem.Allocator,

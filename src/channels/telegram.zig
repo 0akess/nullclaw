@@ -2,6 +2,7 @@ const std = @import("std");
 const root = @import("root.zig");
 const voice = @import("../voice.zig");
 const platform = @import("../platform.zig");
+const config_types = @import("../config_types.zig");
 
 const log = std.log.scoped(.telegram);
 
@@ -224,9 +225,11 @@ pub const SmartSplitIterator = struct {
 pub const TelegramChannel = struct {
     allocator: std.mem.Allocator,
     bot_token: []const u8,
+    account_id: []const u8 = "default",
     allow_from: []const []const u8,
     group_allow_from: []const []const u8,
     group_policy: []const u8,
+    reply_in_private: bool = true,
     transcriber: ?voice.Transcriber = null,
     last_update_id: i64,
     proxy: ?[]const u8,
@@ -249,6 +252,20 @@ pub const TelegramChannel = struct {
             .last_update_id = 0,
             .proxy = null,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.TelegramConfig) TelegramChannel {
+        var ch = init(
+            allocator,
+            cfg.bot_token,
+            cfg.allow_from,
+            cfg.group_allow_from,
+            cfg.group_policy,
+        );
+        ch.account_id = cfg.account_id;
+        ch.reply_in_private = cfg.reply_in_private;
+        ch.proxy = cfg.proxy;
+        return ch;
     }
 
     pub fn channelName(_: *TelegramChannel) []const u8 {
@@ -353,9 +370,13 @@ pub const TelegramChannel = struct {
         // Parse to extract the latest update_id and advance past it
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp_body, .{}) catch return;
         defer parsed.deinit();
+        if (parsed.value != .object) return;
 
-        const result_array = (parsed.value.object.get("result") orelse return).array.items;
+        const result_val = parsed.value.object.get("result") orelse return;
+        if (result_val != .array) return;
+        const result_array = result_val.array.items;
         for (result_array) |update| {
+            if (update != .object) continue;
             if (update.object.get("update_id")) |uid| {
                 if (uid == .integer) {
                     self.last_update_id = uid.integer + 1;
@@ -644,13 +665,17 @@ pub const TelegramChannel = struct {
         // Parse JSON response to extract messages
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, resp_body, .{}) catch return &.{};
         defer parsed.deinit();
+        if (parsed.value != .object) return &.{};
 
-        const result_array = (parsed.value.object.get("result") orelse return &.{}).array.items;
+        const result_val = parsed.value.object.get("result") orelse return &.{};
+        if (result_val != .array) return &.{};
+        const result_array = result_val.array.items;
 
         var messages: std.ArrayListUnmanaged(root.ChannelMessage) = .empty;
         errdefer messages.deinit(allocator);
 
         for (result_array) |update| {
+            if (update != .object) continue;
             // Advance offset
             if (update.object.get("update_id")) |uid| {
                 if (uid == .integer) {
@@ -659,9 +684,11 @@ pub const TelegramChannel = struct {
             }
 
             const message = update.object.get("message") orelse continue;
+            if (message != .object) continue;
 
             // Get sender info — check both @username and numeric user_id
             const from_obj = message.object.get("from") orelse continue;
+            if (from_obj != .object) continue;
             const username_val = from_obj.object.get("username");
             const username = if (username_val) |uv| (if (uv == .string) uv.string else "unknown") else "unknown";
 
@@ -674,6 +701,7 @@ pub const TelegramChannel = struct {
 
             // Get chat_id and chat type
             const chat_obj = message.object.get("chat") orelse continue;
+            if (chat_obj != .object) continue;
             const chat_id_val = chat_obj.object.get("id") orelse continue;
             var chat_id_buf: [32]u8 = undefined;
             const chat_id_str = blk: {
@@ -736,6 +764,7 @@ pub const TelegramChannel = struct {
             const content = blk_content: {
                 const voice_obj = message.object.get("voice") orelse message.object.get("audio");
                 if (voice_obj) |vobj| {
+                    if (vobj != .object) break :blk_content null;
                     const file_id_val = vobj.object.get("file_id") orelse break :blk_content null;
                     const file_id = if (file_id_val == .string) file_id_val.string else break :blk_content null;
 
@@ -1136,11 +1165,13 @@ fn downloadTelegramPhoto(allocator: std.mem.Allocator, bot_token: []const u8, fi
         return null;
     };
     defer parsed.deinit();
+    if (parsed.value != .object) return null;
 
     const result_obj = parsed.value.object.get("result") orelse {
         log.warn("downloadTelegramPhoto: no 'result' in response", .{});
         return null;
     };
+    if (result_obj != .object) return null;
     const fp_val = result_obj.object.get("file_path") orelse {
         log.warn("downloadTelegramPhoto: no 'file_path' in result", .{});
         return null;

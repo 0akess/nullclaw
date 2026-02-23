@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 const log = std.log.scoped(.slack);
 
@@ -33,6 +34,18 @@ pub const SlackChannel = struct {
         };
     }
 
+    fn parseDmPolicy(raw: []const u8) root.DmPolicy {
+        if (std.mem.eql(u8, raw, "deny")) return .deny;
+        if (std.mem.eql(u8, raw, "allowlist")) return .allowlist;
+        return .allow;
+    }
+
+    fn parseGroupPolicy(raw: []const u8) root.GroupPolicy {
+        if (std.mem.eql(u8, raw, "open")) return .open;
+        if (std.mem.eql(u8, raw, "allowlist")) return .allowlist;
+        return .mention_only;
+    }
+
     pub fn initWithPolicy(
         allocator: std.mem.Allocator,
         bot_token: []const u8,
@@ -50,6 +63,22 @@ pub const SlackChannel = struct {
             .last_ts = "0",
             .policy = policy,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.SlackConfig) SlackChannel {
+        const policy = root.ChannelPolicy{
+            .dm = parseDmPolicy(cfg.dm_policy),
+            .group = parseGroupPolicy(cfg.group_policy),
+            .allowlist = cfg.allow_from,
+        };
+        return initWithPolicy(
+            allocator,
+            cfg.bot_token,
+            cfg.app_token,
+            cfg.channel_id,
+            cfg.allow_from,
+            policy,
+        );
     }
 
     /// Set the thread timestamp for threaded replies.

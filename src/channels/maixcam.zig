@@ -36,6 +36,14 @@ pub const MaixCamChannel = struct {
         };
     }
 
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.MaixCamConfig) MaixCamChannel {
+        return init(allocator, cfg);
+    }
+
+    pub fn setBus(self: *MaixCamChannel, b: *bus.Bus) void {
+        self.event_bus = b;
+    }
+
     pub fn deinit(self: *MaixCamChannel) void {
         self.closeAllClients();
         self.clients.deinit(self.allocator);

@@ -578,6 +578,12 @@ fn whatsappSessionKey(buf: []u8, body: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "whatsapp:{s}", .{sender}) catch "whatsapp:unknown";
 }
 
+fn whatsappReplyTarget(body: []const u8) []const u8 {
+    // Cloud API delivery is addressed by recipient id ("from" for inbound DMs).
+    // Group IDs are used for routing/session isolation, not outbound target.
+    return jsonStringField(body, "from") orelse "unknown";
+}
+
 fn whatsappSessionKeyRouted(
     allocator: std.mem.Allocator,
     fallback_buf: []u8,
@@ -594,11 +600,12 @@ fn whatsappSessionKeyRouted(
     const peer_kind: agent_routing.ChatType = if (group_id != null) .group else .direct;
 
     if (cfg_opt) |cfg| {
-        const route = agent_routing.resolveRoute(allocator, .{
+        const route = agent_routing.resolveRouteWithSession(allocator, .{
             .channel = "whatsapp",
             .account_id = account_id,
             .peer = .{ .kind = peer_kind, .id = peer_id },
-        }, cfg.agent_bindings, cfg.agents) catch return whatsappSessionKey(fallback_buf, body);
+        }, cfg.agent_bindings, cfg.agents, cfg.session) catch return whatsappSessionKey(fallback_buf, body);
+        allocator.free(route.main_session_key);
         return route.session_key;
     }
 
@@ -614,11 +621,12 @@ fn resolveRouteSessionKey(
     fallback: []const u8,
 ) []const u8 {
     if (cfg_opt) |cfg| {
-        const route = agent_routing.resolveRoute(allocator, .{
+        const route = agent_routing.resolveRouteWithSession(allocator, .{
             .channel = channel,
             .account_id = account_id,
             .peer = peer,
-        }, cfg.agent_bindings, cfg.agents) catch return fallback;
+        }, cfg.agent_bindings, cfg.agents, cfg.session) catch return fallback;
+        allocator.free(route.main_session_key);
         return route.session_key;
     }
     return fallback;
@@ -1024,7 +1032,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
 
                             if (state.event_bus) |eb| {
                                 // Bus mode: publish and return immediately
-                                _ = publishToBus(eb, req_allocator, "webhook", bearer orelse "anon", session_key, msg_text, session_key, null);
+                                _ = publishToBus(eb, state.allocator, "webhook", bearer orelse "anon", session_key, msg_text, session_key, null);
                                 response_body = "{\"status\":\"received\"}";
                             } else if (session_mgr_opt) |*sm| {
                                 // In-request mode (standalone gateway)
@@ -1141,7 +1149,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                                 var kb: [64]u8 = undefined;
                                 const tg_cfg_opt: ?*const Config = if (config_opt) |cfg| cfg else null;
                                 const sk = telegramSessionKeyRouted(req_allocator, &kb, chat_id.?, b, tg_cfg_opt, state.telegram_account_id);
-                                _ = publishToBus(eb, req_allocator, "telegram", sender, cid_str, msg_text.?, sk, meta);
+                                _ = publishToBus(eb, state.allocator, "telegram", sender, cid_str, msg_text.?, sk, meta);
                                 response_body = "{\"status\":\"ok\"}";
                             } else if (session_mgr_opt) |*sm| {
                                 // In-request mode (standalone gateway)
@@ -1233,11 +1241,12 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                                 const wa_cfg_opt: ?*const Config = if (config_opt) |cfg| cfg else null;
                                 const wa_session_key = whatsappSessionKeyRouted(req_allocator, &wa_key_buf, b, wa_cfg_opt, state.whatsapp_account_id);
                                 const wa_sender = jsonStringField(b, "from") orelse "unknown";
+                                const wa_chat_target = whatsappReplyTarget(b);
 
                                 if (state.event_bus) |eb| {
                                     var meta_buf: [256]u8 = undefined;
                                     const meta = std.fmt.bufPrint(&meta_buf, "{{\"account_id\":\"{s}\"}}", .{state.whatsapp_account_id}) catch null;
-                                    _ = publishToBus(eb, req_allocator, "whatsapp", wa_sender, wa_session_key, mt, wa_session_key, meta);
+                                    _ = publishToBus(eb, state.allocator, "whatsapp", wa_sender, wa_chat_target, mt, wa_session_key, meta);
                                     response_body = "{\"status\":\"received\"}";
                                 } else if (session_mgr_opt) |*sm| {
                                     const reply: ?[]const u8 = sm.processMessage(wa_session_key, mt) catch |err| blk: {
@@ -1282,11 +1291,12 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                                 const wa_cfg_opt: ?*const Config = if (config_opt) |cfg| cfg else null;
                                 const wa_session_key = whatsappSessionKeyRouted(req_allocator, &wa_key_buf, b, wa_cfg_opt, state.whatsapp_account_id);
                                 const wa_sender_ns = jsonStringField(b, "from") orelse "unknown";
+                                const wa_chat_target_ns = whatsappReplyTarget(b);
 
                                 if (state.event_bus) |eb| {
                                     var meta_buf: [256]u8 = undefined;
                                     const meta = std.fmt.bufPrint(&meta_buf, "{{\"account_id\":\"{s}\"}}", .{state.whatsapp_account_id}) catch null;
-                                    _ = publishToBus(eb, req_allocator, "whatsapp", wa_sender_ns, wa_session_key, mt, wa_session_key, meta);
+                                    _ = publishToBus(eb, state.allocator, "whatsapp", wa_sender_ns, wa_chat_target_ns, mt, wa_session_key, meta);
                                     response_body = "{\"status\":\"received\"}";
                                 } else if (session_mgr_opt) |*sm| {
                                     const reply: ?[]const u8 = sm.processMessage(wa_session_key, mt) catch |err| blk: {
@@ -1360,7 +1370,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                                 if (state.event_bus) |eb| {
                                     var meta_buf: [256]u8 = undefined;
                                     const meta = std.fmt.bufPrint(&meta_buf, "{{\"account_id\":\"{s}\"}}", .{state.line_account_id}) catch null;
-                                    _ = publishToBus(eb, req_allocator, "line", uid, uid, text, sk, meta);
+                                    _ = publishToBus(eb, state.allocator, "line", uid, uid, text, sk, meta);
                                 } else if (session_mgr_opt) |*sm| {
                                     const reply: ?[]const u8 = sm.processMessage(sk, text) catch null;
                                     if (reply) |r| {
@@ -1447,7 +1457,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                         if (state.event_bus) |eb| {
                             var meta_buf: [256]u8 = undefined;
                             const meta = std.fmt.bufPrint(&meta_buf, "{{\"account_id\":\"{s}\"}}", .{state.lark_account_id}) catch null;
-                            _ = publishToBus(eb, req_allocator, "lark", msg.sender, msg.sender, msg.content, sk, meta);
+                            _ = publishToBus(eb, state.allocator, "lark", msg.sender, msg.sender, msg.content, sk, meta);
                         } else if (session_mgr_opt) |*sm| {
                             const reply: ?[]const u8 = sm.processMessage(sk, msg.content) catch null;
                             if (reply) |r| {
@@ -1900,6 +1910,34 @@ test "whatsappSessionKeyRouted uses route engine when config exists" {
     try std.testing.expectEqualStrings("agent:wa-agent:whatsapp:group:1203630@g.us", key);
 }
 
+test "whatsappSessionKeyRouted uses nested context.group_jid for group routing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const body = "{\"from\":\"15550001111\",\"context\":{\"group_jid\":\"1203631@g.us\"},\"text\":{\"body\":\"hi\"}}";
+    var key_buf: [256]u8 = undefined;
+
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+        .agent_bindings = &[_]agent_routing.AgentBinding{
+            .{
+                .agent_id = "wa-context-agent",
+                .match = .{
+                    .channel = "whatsapp",
+                    .account_id = "wa-main",
+                    .peer = .{ .kind = .group, .id = "1203631@g.us" },
+                },
+            },
+        },
+    };
+
+    const key = whatsappSessionKeyRouted(allocator, &key_buf, body, &cfg, "wa-main");
+    try std.testing.expectEqualStrings("agent:wa-context-agent:whatsapp:group:1203631@g.us", key);
+}
+
 test "telegramSessionKeyRouted uses group peer for group chats" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1958,6 +1996,39 @@ test "telegramSessionKeyRouted uses direct peer for private chats" {
 
     const key = telegramSessionKeyRouted(allocator, &key_buf, 4242, body, &cfg, "tg-main");
     try std.testing.expectEqualStrings("agent:tg-dm-agent:telegram:direct:4242", key);
+}
+
+test "telegramSessionKeyRouted applies session dm_scope for direct chats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const body =
+        \\{"message":{"chat":{"id":4242,"type":"private"}}}
+    ;
+    var key_buf: [128]u8 = undefined;
+
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+        .agent_bindings = &[_]agent_routing.AgentBinding{
+            .{
+                .agent_id = "tg-dm-agent",
+                .match = .{
+                    .channel = "telegram",
+                    .account_id = "tg-main",
+                    .peer = .{ .kind = .direct, .id = "4242" },
+                },
+            },
+        },
+        .session = .{
+            .dm_scope = .per_peer,
+        },
+    };
+
+    const key = telegramSessionKeyRouted(allocator, &key_buf, 4242, body, &cfg, "tg-main");
+    try std.testing.expectEqualStrings("agent:tg-dm-agent:direct:4242", key);
 }
 
 test "lineSessionKeyRouted uses group id for group events" {

@@ -93,6 +93,10 @@ pub const DiscordChannel = struct {
         return true;
     }
 
+    pub fn setBus(self: *DiscordChannel, b: *bus_mod.Bus) void {
+        self.bus = b;
+    }
+
     // ── Pure helper functions ─────────────────────────────────────────────
 
     /// Build IDENTIFY JSON payload (op=2).
@@ -389,6 +393,7 @@ pub const DiscordChannel = struct {
         defer parsed.deinit();
 
         const root_val = parsed.value;
+        if (root_val != .object) return;
         const d_val = root_val.object.get("d") orelse return;
         switch (d_val) {
             .object => |d_obj| {
@@ -420,6 +425,10 @@ pub const DiscordChannel = struct {
         defer parsed.deinit();
 
         const root_val = parsed.value;
+        if (root_val != .object) {
+            log.warn("Discord: gateway message root is not an object", .{});
+            return;
+        }
 
         // Get op code
         const op_val = root_val.object.get("op") orelse {
@@ -519,6 +528,7 @@ pub const DiscordChannel = struct {
 
     /// Handle READY event: extract session_id, resume_gateway_url, bot_user_id.
     fn handleReady(self: *DiscordChannel, root_val: std.json.Value) !void {
+        if (root_val != .object) return;
         const d_val = root_val.object.get("d") orelse {
             log.warn("Discord READY: missing 'd' field", .{});
             return;
@@ -576,6 +586,7 @@ pub const DiscordChannel = struct {
 
     /// Handle MESSAGE_CREATE event and publish to bus if filters pass.
     fn handleMessageCreate(self: *DiscordChannel, root_val: std.json.Value) !void {
+        if (root_val != .object) return;
         const d_val = root_val.object.get("d") orelse {
             log.warn("Discord MESSAGE_CREATE: missing 'd' field", .{});
             return;
@@ -926,6 +937,101 @@ test "discord initFromConfig passes all fields" {
     try std.testing.expectEqual(@as(usize, 2), ch.allow_from.len);
     try std.testing.expect(ch.require_mention);
     try std.testing.expectEqual(@as(u32, 512), ch.intents);
+}
+
+test "discord handleMessageCreate publishes inbound guild message with metadata" {
+    const alloc = std.testing.allocator;
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+
+    var ch = DiscordChannel.initFromConfig(alloc, .{
+        .account_id = "dc-main",
+        .token = "token",
+    });
+    ch.setBus(&event_bus);
+
+    const msg_json =
+        \\{"d":{"channel_id":"c-1","guild_id":"g-1","content":"hello","author":{"id":"u-1","bot":false}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, msg_json, .{});
+    defer parsed.deinit();
+
+    try ch.handleMessageCreate(parsed.value);
+
+    var msg = event_bus.consumeInbound() orelse return try std.testing.expect(false);
+    defer msg.deinit(alloc);
+    try std.testing.expectEqualStrings("discord", msg.channel);
+    try std.testing.expectEqualStrings("u-1", msg.sender_id);
+    try std.testing.expectEqualStrings("c-1", msg.chat_id);
+    try std.testing.expectEqualStrings("hello", msg.content);
+    try std.testing.expectEqualStrings("discord:c-1", msg.session_key);
+    try std.testing.expect(msg.metadata_json != null);
+
+    const meta = try std.json.parseFromSlice(std.json.Value, alloc, msg.metadata_json.?, .{});
+    defer meta.deinit();
+    try std.testing.expect(meta.value == .object);
+    try std.testing.expect(meta.value.object.get("account_id") != null);
+    try std.testing.expect(meta.value.object.get("is_dm") != null);
+    try std.testing.expect(meta.value.object.get("guild_id") != null);
+    try std.testing.expectEqualStrings("dc-main", meta.value.object.get("account_id").?.string);
+    try std.testing.expect(!meta.value.object.get("is_dm").?.bool);
+    try std.testing.expectEqualStrings("g-1", meta.value.object.get("guild_id").?.string);
+}
+
+test "discord handleMessageCreate sets is_dm metadata for direct messages" {
+    const alloc = std.testing.allocator;
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+
+    var ch = DiscordChannel.initFromConfig(alloc, .{
+        .account_id = "dc-main",
+        .token = "token",
+    });
+    ch.setBus(&event_bus);
+
+    const msg_json =
+        \\{"d":{"channel_id":"dm-7","content":"hi dm","author":{"id":"u-7","bot":false}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, msg_json, .{});
+    defer parsed.deinit();
+
+    try ch.handleMessageCreate(parsed.value);
+
+    var msg = event_bus.consumeInbound() orelse return try std.testing.expect(false);
+    defer msg.deinit(alloc);
+    try std.testing.expectEqualStrings("discord:dm-7", msg.session_key);
+    try std.testing.expect(msg.metadata_json != null);
+
+    const meta = try std.json.parseFromSlice(std.json.Value, alloc, msg.metadata_json.?, .{});
+    defer meta.deinit();
+    try std.testing.expect(meta.value == .object);
+    try std.testing.expect(meta.value.object.get("is_dm") != null);
+    try std.testing.expect(meta.value.object.get("is_dm").?.bool);
+    try std.testing.expect(meta.value.object.get("guild_id") == null);
+}
+
+test "discord handleMessageCreate require_mention blocks unmentioned guild messages" {
+    const alloc = std.testing.allocator;
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+
+    var ch = DiscordChannel.initFromConfig(alloc, .{
+        .account_id = "dc-main",
+        .token = "token",
+        .require_mention = true,
+    });
+    ch.setBus(&event_bus);
+    ch.bot_user_id = try alloc.dupe(u8, "bot-1");
+    defer alloc.free(ch.bot_user_id.?);
+
+    const msg_json =
+        \\{"d":{"channel_id":"c-2","guild_id":"g-2","content":"plain text","author":{"id":"u-2","bot":false}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, msg_json, .{});
+    defer parsed.deinit();
+
+    try ch.handleMessageCreate(parsed.value);
+    try std.testing.expectEqual(@as(usize, 0), event_bus.inboundDepth());
 }
 
 test "discord intent bitmask guilds" {

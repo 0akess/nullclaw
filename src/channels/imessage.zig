@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 /// iMessage channel — uses macOS AppleScript bridge.
 /// Polls ~/Library/Messages/chat.db for new messages, sends via osascript.
@@ -23,6 +24,15 @@ pub const IMessageChannel = struct {
             .group_policy = group_policy,
             .poll_interval_secs = 3,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.IMessageConfig) IMessageChannel {
+        return init(
+            allocator,
+            cfg.allow_from,
+            cfg.group_allow_from,
+            cfg.group_policy,
+        );
     }
 
     pub fn channelName(_: *IMessageChannel) []const u8 {

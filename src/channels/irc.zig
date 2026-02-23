@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 const log = std.log.scoped(.irc);
 
@@ -87,6 +88,22 @@ pub const IrcChannel = struct {
             .sasl_password = sasl_password,
             .tls = tls_verify,
         };
+    }
+
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.IrcConfig) IrcChannel {
+        return init(
+            allocator,
+            cfg.host,
+            cfg.port,
+            cfg.nick,
+            cfg.username,
+            cfg.channels,
+            cfg.allow_from,
+            cfg.server_password,
+            cfg.nickserv_password,
+            cfg.sasl_password,
+            cfg.tls,
+        );
     }
 
     pub fn channelName(_: *IrcChannel) []const u8 {

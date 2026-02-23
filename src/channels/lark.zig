@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 /// Lark/Feishu channel — receives events via HTTP callback, sends via Open API.
 ///
@@ -43,6 +44,19 @@ pub const LarkChannel = struct {
         };
     }
 
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.LarkConfig) LarkChannel {
+        var ch = init(
+            allocator,
+            cfg.app_id,
+            cfg.app_secret,
+            cfg.verification_token orelse "",
+            cfg.port orelse 9000,
+            cfg.allow_from,
+        );
+        ch.use_feishu = cfg.use_feishu;
+        return ch;
+    }
+
     /// Return the API base URL based on region setting.
     pub fn apiBase(self: *const LarkChannel) []const u8 {
         return if (self.use_feishu) FEISHU_BASE_URL else LARK_BASE_URL;
@@ -73,18 +87,23 @@ pub const LarkChannel = struct {
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return result.items;
         defer parsed.deinit();
         const val = parsed.value;
+        if (val != .object) return result.items;
 
         // Check event type
         const header = val.object.get("header") orelse return result.items;
+        if (header != .object) return result.items;
         const event_type_val = header.object.get("event_type") orelse return result.items;
         const event_type = if (event_type_val == .string) event_type_val.string else return result.items;
         if (!std.mem.eql(u8, event_type, "im.message.receive_v1")) return result.items;
 
         const event = val.object.get("event") orelse return result.items;
+        if (event != .object) return result.items;
 
         // Extract sender open_id
         const sender_obj = event.object.get("sender") orelse return result.items;
+        if (sender_obj != .object) return result.items;
         const sender_id_obj = sender_obj.object.get("sender_id") orelse return result.items;
+        if (sender_id_obj != .object) return result.items;
         const open_id_val = sender_id_obj.object.get("open_id") orelse return result.items;
         const open_id = if (open_id_val == .string) open_id_val.string else return result.items;
         if (open_id.len == 0) return result.items;
@@ -93,6 +112,7 @@ pub const LarkChannel = struct {
 
         // Message content
         const msg_obj = event.object.get("message") orelse return result.items;
+        if (msg_obj != .object) return result.items;
         const msg_type_val = msg_obj.object.get("message_type") orelse return result.items;
         const msg_type = if (msg_type_val == .string) msg_type_val.string else return result.items;
 
@@ -104,6 +124,7 @@ pub const LarkChannel = struct {
             // Content is a JSON string like {"text":"hello"}
             const inner = std.json.parseFromSlice(std.json.Value, allocator, content_str, .{}) catch return result.items;
             defer inner.deinit();
+            if (inner.value != .object) return result.items;
             const text_val = inner.value.object.get("text") orelse return result.items;
             const text = if (text_val == .string) text_val.string else return result.items;
             if (text.len == 0) return result.items;
@@ -237,6 +258,7 @@ pub const LarkChannel = struct {
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp_body, .{}) catch return error.LarkApiError;
         defer parsed.deinit();
+        if (parsed.value != .object) return error.LarkApiError;
 
         const token_val = parsed.value.object.get("tenant_access_token") orelse return error.LarkApiError;
         if (token_val != .string) return error.LarkApiError;
@@ -393,6 +415,7 @@ pub const ParsedLarkMessage = struct {
 pub fn parsePostContent(allocator: std.mem.Allocator, post_json: []const u8) !?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, post_json, .{}) catch return null;
     defer parsed.deinit();
+    if (parsed.value != .object) return null;
 
     // Try locale keys: zh_cn, en_us, or first object value
     const locale = parsed.value.object.get("zh_cn") orelse
@@ -625,6 +648,25 @@ test "lark parse challenge produces no messages" {
     const payload =
         \\{"challenge":"abc123","token":"test_verification_token","type":"url_verification"}
     ;
+    const msgs = try ch.parseEventPayload(allocator, payload);
+    defer allocator.free(msgs);
+    try std.testing.expectEqual(@as(usize, 0), msgs.len);
+}
+
+test "lark parse non-object payload is ignored safely" {
+    const allocator = std.testing.allocator;
+    const users = [_][]const u8{"*"};
+    const ch = LarkChannel.init(allocator, "id", "secret", "token", 9898, &users);
+    const msgs = try ch.parseEventPayload(allocator, "\"not an object\"");
+    defer allocator.free(msgs);
+    try std.testing.expectEqual(@as(usize, 0), msgs.len);
+}
+
+test "lark parse invalid header shape is ignored safely" {
+    const allocator = std.testing.allocator;
+    const users = [_][]const u8{"*"};
+    const ch = LarkChannel.init(allocator, "id", "secret", "token", 9898, &users);
+    const payload = "{\"header\":\"oops\",\"event\":{}}";
     const msgs = try ch.parseEventPayload(allocator, payload);
     defer allocator.free(msgs);
     try std.testing.expectEqual(@as(usize, 0), msgs.len);

@@ -198,6 +198,10 @@ pub const OneBotChannel = struct {
         };
     }
 
+    pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config_types.OneBotConfig) OneBotChannel {
+        return init(allocator, cfg);
+    }
+
     pub fn channelName(_: *OneBotChannel) []const u8 {
         return "onebot";
     }
