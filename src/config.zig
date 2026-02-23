@@ -1496,6 +1496,7 @@ test "parse slack accounts" {
     try std.testing.expectEqualStrings("main", sc.account_id);
     try std.testing.expectEqualStrings("xoxb-123", sc.bot_token);
     try std.testing.expectEqualStrings("xapp-456", sc.app_token.?);
+    try std.testing.expectEqualStrings("pairing", sc.dm_policy);
     allocator.free(sc.account_id);
     allocator.free(sc.bot_token);
     allocator.free(sc.app_token.?);

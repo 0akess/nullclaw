@@ -149,6 +149,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
         agent.policy = &policy;
+        if (session_id) |sid| {
+            agent.memory_session_id = sid;
+        }
         defer agent.deinit();
 
         // Enable streaming if provider supports it
@@ -226,6 +229,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
     agent.policy = &policy;
+    if (session_id) |sid| {
+        agent.memory_session_id = sid;
+    }
     defer agent.deinit();
 
     // Enable streaming if provider supports it

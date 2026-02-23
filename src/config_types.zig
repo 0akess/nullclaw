@@ -178,7 +178,7 @@ pub const SlackConfig = struct {
     webhook_path: []const u8 = "/slack/events",
     channel_id: ?[]const u8 = null,
     allow_from: []const []const u8 = &.{},
-    dm_policy: []const u8 = "allowlist",
+    dm_policy: []const u8 = "pairing",
     group_policy: []const u8 = "mention_only",
 };
 
