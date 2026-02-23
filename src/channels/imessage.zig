@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const root = @import("root.zig");
 const bus_mod = @import("../bus.zig");
 const config_types = @import("../config_types.zig");
+const platform = @import("../platform.zig");
 
 const log = std.log.scoped(.imessage);
 
@@ -557,10 +558,14 @@ pub fn isValidChatGuid(chat_guid: []const u8) bool {
 // ════════════════════════════════════════════════════════════════════════════
 
 fn createTestDb(allocator: std.mem.Allocator) ![]u8 {
-    const path = try std.fmt.allocPrint(allocator, "/tmp/nullclaw_imessage_{d}_{x}.db", .{
+    const tmp_dir = try platform.getTempDir(allocator);
+    defer allocator.free(tmp_dir);
+    const filename = try std.fmt.allocPrint(allocator, "nullclaw_imessage_{d}_{x}.db", .{
         std.time.microTimestamp(),
         std.crypto.random.int(u32),
     });
+    defer allocator.free(filename);
+    const path = try std.fs.path.join(allocator, &.{ tmp_dir, filename });
 
     var db: ?*c.sqlite3 = null;
     const path_z = try allocator.dupeZ(u8, path);

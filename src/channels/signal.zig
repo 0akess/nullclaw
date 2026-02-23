@@ -2208,6 +2208,48 @@ test "process envelope sender none when both missing" {
     try std.testing.expect(msg == null);
 }
 
+test "parseSSEEnvelope returns owned message content" {
+    const users = [_][]const u8{"*"};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &.{},
+        true,
+        true,
+    );
+
+    const raw_json =
+        \\{
+        \\  "envelope": {
+        \\    "source": "uuid-123",
+        \\    "sourceNumber": "+1111111111",
+        \\    "timestamp": 1700000000,
+        \\    "dataMessage": {
+        \\      "message": "hello from sse",
+        \\      "timestamp": 1700000001
+        \\    }
+        \\  }
+        \\}
+    ;
+    const json_buf = try std.testing.allocator.dupe(u8, raw_json);
+    defer std.testing.allocator.free(json_buf);
+
+    const msg_opt = try ch.parseSSEEnvelope(json_buf);
+    try std.testing.expect(msg_opt != null);
+    const msg = msg_opt.?;
+    defer msg.deinit(std.testing.allocator);
+
+    @memset(json_buf, 'x');
+    const churn = try std.testing.allocator.alloc(u8, 2048);
+    defer std.testing.allocator.free(churn);
+    @memset(churn, 'z');
+
+    try std.testing.expectEqualStrings("hello from sse", msg.content);
+    try std.testing.expectEqualStrings("+1111111111", msg.sender);
+}
+
 // ── Vtable Tests ────────────────────────────────────────────────────
 
 test "vtable struct has all fields" {
