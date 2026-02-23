@@ -5,6 +5,8 @@
 //! scheduling, delegation, browser, and image tools.
 
 const std = @import("std");
+const memory_mod = @import("../memory/root.zig");
+const Memory = memory_mod.Memory;
 
 // ── JSON arg extraction helpers ─────────────────────────────────
 // Used by all tool implementations to extract typed fields from
@@ -402,6 +404,22 @@ pub fn allTools(
     }
 
     return list.toOwnedSlice(allocator);
+}
+
+/// Bind a memory backend to memory tools in a pre-built tool list.
+pub fn bindMemoryTools(tools: []const Tool, memory: ?Memory) void {
+    for (tools) |t| {
+        if (std.mem.eql(u8, t.name(), memory_store.MemoryStoreTool.tool_name)) {
+            const mt: *memory_store.MemoryStoreTool = @ptrCast(@alignCast(t.ptr));
+            mt.memory = memory;
+        } else if (std.mem.eql(u8, t.name(), memory_recall.MemoryRecallTool.tool_name)) {
+            const mt: *memory_recall.MemoryRecallTool = @ptrCast(@alignCast(t.ptr));
+            mt.memory = memory;
+        } else if (std.mem.eql(u8, t.name(), memory_forget.MemoryForgetTool.tool_name)) {
+            const mt: *memory_forget.MemoryForgetTool = @ptrCast(@alignCast(t.ptr));
+            mt.memory = memory;
+        }
+    }
 }
 
 /// Free all heap-allocated tool structs and the tools slice itself.

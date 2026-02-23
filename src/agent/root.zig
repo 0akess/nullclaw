@@ -121,6 +121,8 @@ pub const Agent = struct {
         mem: ?Memory,
         observer_i: Observer,
     ) !Agent {
+        tools_mod.bindMemoryTools(tools, mem);
+
         // Build tool specs for function-calling APIs
         const specs = try allocator.alloc(ToolSpec, tools.len);
         for (tools, 0..) |t, i| {
@@ -1646,6 +1648,13 @@ fn makeTestAgent(allocator: std.mem.Allocator) !Agent {
     };
 }
 
+fn find_tool_by_name(tools: []const Tool, name: []const u8) ?Tool {
+    for (tools) |t| {
+        if (std.mem.eql(u8, t.name(), name)) return t;
+    }
+    return null;
+}
+
 test "slash /new clears history" {
     const allocator = std.testing.allocator;
     var agent = try makeTestAgent(allocator);
@@ -1839,6 +1848,92 @@ test "milliTimestamp negative difference clamps to zero" {
     const clamped = @max(0, diff);
     const duration: u64 = @as(u64, @intCast(clamped));
     try std.testing.expectEqual(@as(u64, 0), duration);
+}
+
+test "Agent.fromConfig wires memory tools to sqlite backend" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc_test",
+        .config_path = "/tmp/yc_test/config.json",
+        .allocator = allocator,
+    };
+
+    const tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{});
+    defer tools_mod.deinitTools(allocator, tools);
+
+    var mem = try memory_mod.createMemory(allocator, "sqlite", ":memory:");
+    defer mem.deinit();
+
+    const DummyProvider = struct {
+        fn chatWithSystem(_: *anyopaque, allocator_: std.mem.Allocator, _: ?[]const u8, _: []const u8, _: []const u8, _: f64) anyerror![]const u8 {
+            return allocator_.dupe(u8, "");
+        }
+
+        fn chat(_: *anyopaque, _: std.mem.Allocator, _: providers.ChatRequest, _: []const u8, _: f64) anyerror!providers.ChatResponse {
+            return .{};
+        }
+
+        fn supportsNativeTools(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn getName(_: *anyopaque) []const u8 {
+            return "dummy";
+        }
+
+        fn deinitFn(_: *anyopaque) void {}
+    };
+
+    var dummy_state: u8 = 0;
+    const provider_vtable = Provider.VTable{
+        .chatWithSystem = DummyProvider.chatWithSystem,
+        .chat = DummyProvider.chat,
+        .supportsNativeTools = DummyProvider.supportsNativeTools,
+        .getName = DummyProvider.getName,
+        .deinit = DummyProvider.deinitFn,
+    };
+    const provider_i = Provider{
+        .ptr = @ptrCast(&dummy_state),
+        .vtable = &provider_vtable,
+    };
+
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfig(
+        allocator,
+        &cfg,
+        provider_i,
+        tools,
+        mem,
+        noop.observer(),
+    );
+    defer agent.deinit();
+
+    const store_tool = find_tool_by_name(tools, "memory_store").?;
+    const store_args = try tools_mod.parseTestArgs("{\"key\":\"preference.test\",\"content\":\"123\"}");
+    defer store_args.deinit();
+
+    const store_result = try store_tool.execute(allocator, store_args.value.object);
+    defer if (store_result.output.len > 0) allocator.free(store_result.output);
+    try std.testing.expect(store_result.success);
+    try std.testing.expect(std.mem.indexOf(u8, store_result.output, "Stored memory") != null);
+
+    const entry = try mem.get(allocator, "preference.test");
+    try std.testing.expect(entry != null);
+    if (entry) |e| {
+        defer e.deinit(allocator);
+        try std.testing.expectEqualStrings("123", e.content);
+    }
+
+    const recall_tool = find_tool_by_name(tools, "memory_recall").?;
+    const recall_args = try tools_mod.parseTestArgs("{\"query\":\"preference.test\"}");
+    defer recall_args.deinit();
+
+    const recall_result = try recall_tool.execute(allocator, recall_args.value.object);
+    defer if (recall_result.output.len > 0) allocator.free(recall_result.output);
+    try std.testing.expect(recall_result.success);
+    try std.testing.expect(std.mem.indexOf(u8, recall_result.output, "preference.test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recall_result.output, "123") != null);
 }
 
 test "Agent tool loop frees dynamic tool outputs" {
