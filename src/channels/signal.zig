@@ -199,7 +199,12 @@ pub const SignalChannel = struct {
     /// - Empty list = use allow_from fallback for group sender checks.
     /// - `*` = allow all group senders.
     pub fn isGroupSenderAllowed(self: *const SignalChannel, sender: []const u8) bool {
-        return root.isAllowed(self.group_allow_from, sender);
+        if (self.group_allow_from.len == 0) return false;
+        for (self.group_allow_from) |entry| {
+            if (std.mem.eql(u8, entry, "*")) return true;
+            if (std.mem.eql(u8, normalizeAllowEntry(entry), normalizeAllowEntry(sender))) return true;
+        }
+        return false;
     }
 
     // ── Envelope Processing ─────────────────────────────────────────
@@ -232,9 +237,15 @@ pub const SignalChannel = struct {
         // Skip attachment-only messages when configured.
         if (self.ignore_attachments and dm_attachment_ids.len > 0 and !has_message_text) return null;
 
-        // Effective sender: prefer source_number (E.164), fall back to source (UUID).
+        // Effective sender for reply target: prefer source_number (E.164), fall back to source (UUID).
         const sender_raw = source_number orelse source orelse return null;
         if (sender_raw.len == 0) return null;
+        const sender_alt = blk: {
+            if (source) |src| {
+                if (!std.mem.eql(u8, src, sender_raw)) break :blk src;
+            }
+            break :blk null;
+        };
 
         // Group/DM policy checks.
         if (dm_group_id != null) {
@@ -243,14 +254,17 @@ pub const SignalChannel = struct {
             if (!std.mem.eql(u8, self.group_policy, "open")) {
                 // Allowlist mode: check group_allow_from for sender, fall back to allow_from.
                 const group_allowed = if (self.group_allow_from.len > 0)
-                    self.isGroupSenderAllowed(sender_raw)
+                    self.isGroupSenderAllowed(sender_raw) or
+                        (if (sender_alt) |alt| self.isGroupSenderAllowed(alt) else false)
                 else
-                    self.isSenderAllowed(sender_raw);
+                    self.isSenderAllowed(sender_raw) or
+                        (if (sender_alt) |alt| self.isSenderAllowed(alt) else false);
                 if (!group_allowed) return null;
             }
         } else {
             // DM context: check allow_from
-            if (!self.isSenderAllowed(sender_raw)) return null;
+            if (!(self.isSenderAllowed(sender_raw) or
+                (if (sender_alt) |alt| self.isSenderAllowed(alt) else false))) return null;
         }
 
         // Determine message text and fetch attachments.
@@ -979,6 +993,22 @@ test "group sender allowlist filtering" {
         true,
     );
     try std.testing.expect(ch.isGroupSenderAllowed("+15550001111"));
+    try std.testing.expect(!ch.isGroupSenderAllowed("+15550002222"));
+}
+
+test "group sender allowlist supports uuid-prefixed entries" {
+    const uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const senders = [_][]const u8{"uuid:" ++ uuid};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &.{},
+        &senders,
+        true,
+        true,
+    );
+    try std.testing.expect(ch.isGroupSenderAllowed(uuid));
     try std.testing.expect(!ch.isGroupSenderAllowed("+15550002222"));
 }
 
@@ -1736,6 +1766,38 @@ test "process envelope group accepted when sender in group_allow_from" {
     const m2 = msg2.?;
     defer m2.deinit(std.testing.allocator);
     try std.testing.expect(m2.is_group);
+}
+
+test "process envelope group accepts uuid allowlist when source_number is present" {
+    const uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const users = [_][]const u8{"*"};
+    const group_users = [_][]const u8{"uuid:" ++ uuid};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &group_users,
+        true,
+        true,
+    );
+
+    const msg = try ch.processEnvelope(
+        std.testing.allocator,
+        uuid, // source (UUID)
+        "+1111111111", // source_number present
+        null,
+        1000,
+        false,
+        "hi",
+        1000,
+        "group123",
+        &.{},
+    );
+    try std.testing.expect(msg != null);
+    const m = msg.?;
+    defer m.deinit(std.testing.allocator);
+    try std.testing.expect(m.is_group);
 }
 
 test "process envelope group sender not in group_allow_from" {
