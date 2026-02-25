@@ -128,15 +128,22 @@ pub const LanceDbMemory = struct {
 
     // ── Duplicate detection ──────────────────────────────────────
 
-    fn isDuplicate(self: *Self, new_embedding: []const f32) bool {
+    fn isDuplicate(self: *Self, new_embedding: []const f32, exclude_key: []const u8) bool {
         const db = self.db orelse return false;
 
-        const sql = "SELECT embedding FROM lancedb_memories WHERE embedding IS NOT NULL";
+        const sql = "SELECT embedding, key FROM lancedb_memories WHERE embedding IS NOT NULL";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(db, sql, -1, &stmt, null) != c.SQLITE_OK) return false;
         defer _ = c.sqlite3_finalize(stmt);
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            // Skip the entry being updated so upserts are not blocked by self-similarity
+            const row_key_ptr = c.sqlite3_column_text(stmt, 1);
+            if (row_key_ptr != null) {
+                const row_key = std.mem.span(row_key_ptr);
+                if (std.mem.eql(u8, row_key, exclude_key)) continue;
+            }
+
             const blob_ptr = c.sqlite3_column_blob(stmt, 0);
             const blob_len = c.sqlite3_column_bytes(stmt, 0);
             if (blob_ptr == null or blob_len <= 0) continue;
@@ -194,8 +201,8 @@ pub const LanceDbMemory = struct {
             };
             if (emb) |e| {
                 if (e.len > 0) {
-                    // Check for duplicates
-                    if (self_.isDuplicate(e)) {
+                    // Check for duplicates (exclude same key so upserts work)
+                    if (self_.isDuplicate(e, key)) {
                         log.debug("duplicate detected for key '{s}', skipping store", .{key});
                         return;
                     }
@@ -276,12 +283,21 @@ pub const LanceDbMemory = struct {
     }
 
     fn vectorRecall(self_: *Self, db: *c.sqlite3, allocator: std.mem.Allocator, query_emb: []const f32, limit: usize, session_id: ?[]const u8) ![]MemoryEntry {
-        _ = session_id; // TODO: add session filter
-
-        const sql = "SELECT key, text, category, created_at, embedding FROM lancedb_memories WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT 1000";
+        const sql = if (session_id != null)
+            "SELECT key, text, category, created_at, embedding FROM lancedb_memories WHERE embedding IS NOT NULL AND session_id = ?1 ORDER BY created_at DESC LIMIT 1000"
+        else
+            "SELECT key, text, category, created_at, embedding FROM lancedb_memories WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT 1000";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
         defer _ = c.sqlite3_finalize(stmt);
+
+        // Bind session_id filter — must outlive sqlite3_step loop
+        var sid_z: ?[:0]u8 = null;
+        defer if (sid_z) |sz| allocator.free(sz);
+        if (session_id) |sid| {
+            sid_z = try allocator.dupeZ(u8, sid);
+            _ = c.sqlite3_bind_text(stmt, 1, sid_z.?.ptr, @intCast(sid_z.?.len), SQLITE_STATIC);
+        }
 
         const Scored = struct { entry: MemoryEntry, score: f32 };
         var scored: std.ArrayListUnmanaged(Scored) = .{};
@@ -360,18 +376,28 @@ pub const LanceDbMemory = struct {
 
     fn textRecall(self_: *Self, db: *c.sqlite3, allocator: std.mem.Allocator, query: []const u8, limit: usize, session_id: ?[]const u8) ![]MemoryEntry {
         _ = self_;
-        _ = session_id; // TODO: add session filter
 
         const like_pattern = try std.fmt.allocPrint(allocator, "%{s}%", .{query});
         defer allocator.free(like_pattern);
 
-        const sql = "SELECT key, text, category, created_at FROM lancedb_memories WHERE text LIKE ?1 OR key LIKE ?1 ORDER BY created_at DESC LIMIT ?2";
+        const sql = if (session_id != null)
+            "SELECT key, text, category, created_at FROM lancedb_memories WHERE (text LIKE ?1 OR key LIKE ?1) AND session_id = ?3 ORDER BY created_at DESC LIMIT ?2"
+        else
+            "SELECT key, text, category, created_at FROM lancedb_memories WHERE text LIKE ?1 OR key LIKE ?1 ORDER BY created_at DESC LIMIT ?2";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
         defer _ = c.sqlite3_finalize(stmt);
 
         _ = c.sqlite3_bind_text(stmt, 1, like_pattern.ptr, @intCast(like_pattern.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_int(stmt, 2, @intCast(limit));
+
+        // Bind session_id filter — must outlive sqlite3_step loop
+        var sid_z: ?[:0]u8 = null;
+        defer if (sid_z) |sz| allocator.free(sz);
+        if (session_id) |sid| {
+            sid_z = try allocator.dupeZ(u8, sid);
+            _ = c.sqlite3_bind_text(stmt, 3, sid_z.?.ptr, @intCast(sid_z.?.len), SQLITE_STATIC);
+        }
 
         var results: std.ArrayListUnmanaged(MemoryEntry) = .{};
         errdefer {
@@ -459,7 +485,6 @@ pub const LanceDbMemory = struct {
     fn implList(ptr: *anyopaque, allocator: std.mem.Allocator, category: ?MemoryCategory, session_id: ?[]const u8) anyerror![]MemoryEntry {
         const self_: *Self = @ptrCast(@alignCast(ptr));
         const db = self_.db orelse return error.NotConnected;
-        _ = session_id; // TODO: filter by session
 
         var results: std.ArrayListUnmanaged(MemoryEntry) = .{};
         errdefer {
@@ -467,7 +492,15 @@ pub const LanceDbMemory = struct {
             results.deinit(allocator);
         }
 
-        const sql = if (category != null) "SELECT key, text, category, created_at FROM lancedb_memories WHERE category = ?1 ORDER BY created_at DESC" else "SELECT key, text, category, created_at FROM lancedb_memories ORDER BY created_at DESC";
+        // Build SQL with optional category and session_id filters
+        const sql = if (category != null and session_id != null)
+            "SELECT key, text, category, created_at FROM lancedb_memories WHERE category = ?1 AND session_id = ?2 ORDER BY created_at DESC"
+        else if (category != null)
+            "SELECT key, text, category, created_at FROM lancedb_memories WHERE category = ?1 ORDER BY created_at DESC"
+        else if (session_id != null)
+            "SELECT key, text, category, created_at FROM lancedb_memories WHERE session_id = ?1 ORDER BY created_at DESC"
+        else
+            "SELECT key, text, category, created_at FROM lancedb_memories ORDER BY created_at DESC";
 
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
@@ -476,10 +509,22 @@ pub const LanceDbMemory = struct {
         // Bind category filter — must outlive sqlite3_step
         var cat_z_buf: ?[:0]u8 = null;
         defer if (cat_z_buf) |cz| allocator.free(cz);
-        if (category) |cat| {
+        var sid_z: ?[:0]u8 = null;
+        defer if (sid_z) |sz| allocator.free(sz);
+
+        if (category != null and session_id != null) {
+            const cat_str = categoryToString(category.?);
+            cat_z_buf = try allocator.dupeZ(u8, cat_str);
+            _ = c.sqlite3_bind_text(stmt, 1, cat_z_buf.?.ptr, @intCast(cat_z_buf.?.len), SQLITE_STATIC);
+            sid_z = try allocator.dupeZ(u8, session_id.?);
+            _ = c.sqlite3_bind_text(stmt, 2, sid_z.?.ptr, @intCast(sid_z.?.len), SQLITE_STATIC);
+        } else if (category) |cat| {
             const cat_str = categoryToString(cat);
             cat_z_buf = try allocator.dupeZ(u8, cat_str);
             _ = c.sqlite3_bind_text(stmt, 1, cat_z_buf.?.ptr, @intCast(cat_z_buf.?.len), SQLITE_STATIC);
+        } else if (session_id) |sid| {
+            sid_z = try allocator.dupeZ(u8, sid);
+            _ = c.sqlite3_bind_text(stmt, 1, sid_z.?.ptr, @intCast(sid_z.?.len), SQLITE_STATIC);
         }
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {

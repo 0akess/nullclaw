@@ -511,7 +511,14 @@ pub const MemoryRuntime = struct {
     }
 
     pub fn deinit(self: *MemoryRuntime) void {
-        // P3 cleanup (before engine, since engine may reference vector store)
+        // Engine first: it holds references to P3 components (vector store,
+        // embedding provider, circuit breaker) — must deinit before them.
+        if (self._engine) |engine| {
+            engine.deinit();
+            self._allocator.destroy(engine);
+        }
+
+        // P3 cleanup (outbox borrows db from vector store or primary — deinit before them)
         if (self._outbox) |ob| {
             ob.deinit();
             self._allocator.destroy(ob);
@@ -525,11 +532,6 @@ pub const MemoryRuntime = struct {
         if (self._sidecar_db_path) |p| self._allocator.free(std.mem.span(p));
         if (self._embedding_provider) |ep| {
             ep.deinit();
-        }
-
-        if (self._engine) |engine| {
-            engine.deinit();
-            self._allocator.destroy(engine);
         }
         if (self._semantic_cache) |sc| {
             sc.deinit();
@@ -642,15 +644,15 @@ pub fn initRuntime(
             break :build_engine;
         };
 
-        // QMD adapter (optional)
+        // QMD adapter (optional — alloc failure just skips it, engine remains usable)
         if (config.qmd.enabled) {
-            const qmd = allocator.create(retrieval_qmd.QmdAdapter) catch break :build_engine;
-            qmd.* = retrieval_qmd.QmdAdapter.init(allocator, config.qmd, workspace_dir);
-            qmd.owns_self = true;
-            eng.addSource(qmd.adapter()) catch {
-                allocator.destroy(qmd);
-                // engine still usable without QMD
-            };
+            if (allocator.create(retrieval_qmd.QmdAdapter)) |qmd| {
+                qmd.* = retrieval_qmd.QmdAdapter.init(allocator, config.qmd, workspace_dir);
+                qmd.owns_self = true;
+                eng.addSource(qmd.adapter()) catch {
+                    allocator.destroy(qmd);
+                };
+            } else |_| {}
         }
 
         // Configure extended pipeline stages (query expansion, adaptive, LLM reranker)

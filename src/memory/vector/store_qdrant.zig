@@ -32,13 +32,32 @@ pub const QdrantVectorStore = struct {
 
     const Self = @This();
 
+    /// Validate that a collection name is safe for URL interpolation.
+    /// Qdrant collection names must be alphanumeric, underscore, or hyphen.
+    pub fn validateCollectionName(name: []const u8) !void {
+        if (name.len == 0 or name.len > 255) return error.InvalidCollectionName;
+        for (name) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '-') return error.InvalidCollectionName;
+        }
+    }
+
     pub fn init(allocator: Allocator, config: QdrantConfig) !*Self {
+        try validateCollectionName(config.collection_name);
+
         const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+
+        const owned_url = try allocator.dupe(u8, config.url);
+        errdefer allocator.free(owned_url);
+        const owned_key = if (config.api_key) |k| try allocator.dupe(u8, k) else null;
+        errdefer if (owned_key) |k| allocator.free(k);
+        const owned_name = try allocator.dupe(u8, config.collection_name);
+
         self.* = .{
             .allocator = allocator,
-            .url = try allocator.dupe(u8, config.url),
-            .api_key = if (config.api_key) |k| try allocator.dupe(u8, k) else null,
-            .collection_name = try allocator.dupe(u8, config.collection_name),
+            .url = owned_url,
+            .api_key = owned_key,
+            .collection_name = owned_name,
             .dimensions = config.dimensions,
             .owns_self = true,
         };

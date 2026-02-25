@@ -26,10 +26,16 @@ pub const OllamaEmbedding = struct {
         dims: ?u32,
     ) !*Self {
         const self_ = try allocator.create(Self);
+        errdefer allocator.destroy(self_);
+
+        const owned_url = try allocator.dupe(u8, base_url orelse default_base_url);
+        errdefer allocator.free(owned_url);
+        const owned_model = try allocator.dupe(u8, model orelse default_model);
+
         self_.* = .{
             .allocator = allocator,
-            .base_url = try allocator.dupe(u8, base_url orelse default_base_url),
-            .model = try allocator.dupe(u8, model orelse default_model),
+            .base_url = owned_url,
+            .model = owned_model,
             .dims = dims orelse default_dims,
         };
         return self_;

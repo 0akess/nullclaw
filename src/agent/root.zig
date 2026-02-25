@@ -581,10 +581,10 @@ pub const Agent = struct {
             self.has_system_prompt = true;
         }
 
-        // Auto-save user message to memory (timestamp-based key to avoid overwriting)
+        // Auto-save user message to memory (nanoTimestamp key to avoid collisions within the same second)
         if (self.auto_save) {
             if (self.mem) |mem| {
-                const ts = @as(u64, @intCast(std.time.timestamp()));
+                const ts = @as(u128, @intCast(std.time.nanoTimestamp()));
                 const save_key = std.fmt.allocPrint(self.allocator, "autosave_user_{d}", .{ts}) catch null;
                 if (save_key) |key| {
                     defer self.allocator.free(key);
@@ -884,13 +884,15 @@ pub const Agent = struct {
                 if (self.auto_save) {
                     if (self.mem) |mem| {
                         const summary = if (base_text.len > 100) base_text[0..100] else base_text;
-                        const ts = @as(u64, @intCast(std.time.timestamp()));
-                        const save_key = try std.fmt.allocPrint(self.allocator, "autosave_assistant_{d}", .{ts});
-                        defer self.allocator.free(save_key);
-                        mem.store(save_key, summary, .daily, self.memory_session_id) catch {};
-                        // Vector sync after auto-save
-                        if (self.mem_rt) |rt| {
-                            rt.syncVectorAfterStore(self.allocator, save_key, summary);
+                        const ts = @as(u128, @intCast(std.time.nanoTimestamp()));
+                        const save_key = std.fmt.allocPrint(self.allocator, "autosave_assistant_{d}", .{ts}) catch null;
+                        if (save_key) |key| {
+                            defer self.allocator.free(key);
+                            mem.store(key, summary, .daily, self.memory_session_id) catch {};
+                            // Vector sync after auto-save
+                            if (self.mem_rt) |rt| {
+                                rt.syncVectorAfterStore(self.allocator, key, summary);
+                            }
                         }
                     }
                 }

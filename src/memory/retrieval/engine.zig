@@ -503,7 +503,7 @@ pub const RetrievalEngine = struct {
 
                     if (merged.len > self.top_k) {
                         for (merged[self.top_k..]) |*over| over.deinit(allocator);
-                        merged = allocator.realloc(merged, self.top_k) catch merged[0..self.top_k];
+                        merged = shrinkAlloc(allocator, merged, self.top_k);
                     }
 
                     return merged;
@@ -549,7 +549,7 @@ pub const RetrievalEngine = struct {
         // ── Stage 8: final limit ──
         if (merged.len > self.top_k) {
             for (merged[self.top_k..]) |*over| over.deinit(allocator);
-            merged = allocator.realloc(merged, self.top_k) catch merged[0..self.top_k];
+            merged = shrinkAlloc(allocator, merged, self.top_k);
         }
 
         return merged;
@@ -592,32 +592,25 @@ pub const RetrievalEngine = struct {
 
         if (ranked_indices.len == 0) return candidates;
 
-        // Reorder candidates in-place based on ranked indices (1-based)
-        var reordered = allocator.alloc(RetrievalCandidate, ranked_indices.len) catch return candidates;
-        for (ranked_indices, 0..) |idx, i| {
-            if (idx >= 1 and idx <= candidates.len) {
-                reordered[i] = candidates[idx - 1];
-                // Update final_score to reflect new rank
-                reordered[i].final_score = 1.0 / @as(f64, @floatFromInt(i + 1));
-            }
-        }
-        // Free unused candidates not in the reordered set
-        var used = allocator.alloc(bool, candidates.len) catch {
-            allocator.free(reordered);
-            return candidates;
-        };
-        defer allocator.free(used);
-        @memset(used, false);
-        for (ranked_indices) |idx| {
-            if (idx >= 1 and idx <= candidates.len) used[idx - 1] = true;
-        }
-        for (candidates, 0..) |*c, ci| {
-            if (!used[ci]) c.deinit(allocator);
-        }
-        allocator.free(candidates);
+        // Use reorderCandidates which correctly handles partial rankings
+        // by appending unranked candidates at the end in original order.
+        const reordered = llm_reranker_mod.reorderCandidates(
+            allocator,
+            candidates,
+            ranked_indices,
+        ) catch return candidates;
 
-        log.debug("LLM reranker applied: {d} candidates reordered", .{reordered.len});
-        return reordered;
+        // reorderCandidates returns shallow copies (pointers into original),
+        // so copy them back into the original slice (same length, no alloc needed).
+        // Update final_score to reflect new rank order.
+        for (reordered, 0..) |entry, i| {
+            candidates[i] = entry;
+            candidates[i].final_score = 1.0 / @as(f64, @floatFromInt(i + 1));
+        }
+        allocator.free(reordered);
+
+        log.debug("LLM reranker applied: {d} candidates reordered", .{candidates.len});
+        return candidates;
     }
 
     pub fn deinit(self: *RetrievalEngine) void {
@@ -629,26 +622,41 @@ pub const RetrievalEngine = struct {
 };
 
 /// Filter candidates below min_score threshold.
-/// Returns the (possibly shrunk) slice. Freed entries are deinited.
+/// Returns the (possibly shrunk) slice. Filtered entries are deinited.
 fn applyMinRelevance(allocator: Allocator, candidates: []RetrievalCandidate, min_score: f64) []RetrievalCandidate {
-    var merged = candidates;
-    if (min_score > 0.0) {
-        var keep: usize = 0;
-        for (merged, 0..) |*ca, idx| {
-            if (ca.final_score >= min_score) {
-                if (keep != idx) {
-                    merged[keep] = ca.*;
-                }
-                keep += 1;
-            } else {
-                ca.deinit(allocator);
+    if (min_score <= 0.0) return candidates;
+
+    var keep: usize = 0;
+    for (candidates, 0..) |*ca, idx| {
+        if (ca.final_score >= min_score) {
+            if (keep != idx) {
+                candidates[keep] = ca.*;
             }
-        }
-        if (keep < merged.len) {
-            merged = allocator.realloc(merged, keep) catch merged[0..keep];
+            keep += 1;
+        } else {
+            ca.deinit(allocator);
         }
     }
-    return merged;
+    return shrinkAlloc(allocator, candidates, keep);
+}
+
+/// Shrink a candidate slice to `new_len`, maintaining correct allocation metadata.
+/// On realloc failure, copies to a fresh allocation rather than returning a
+/// sub-slice whose length mismatches the allocation (which violates the allocator
+/// contract and causes UB with debug allocators like GPA).
+fn shrinkAlloc(allocator: Allocator, slice: []RetrievalCandidate, new_len: usize) []RetrievalCandidate {
+    if (new_len >= slice.len) return slice;
+    return allocator.realloc(slice, new_len) catch blk: {
+        const fresh = allocator.alloc(RetrievalCandidate, new_len) catch {
+            // Both realloc and alloc failed — extremely unlikely.
+            // Return original slice; caller iterates extra deinited slots
+            // but this is the only safe option without leaking or UB.
+            return slice;
+        };
+        @memcpy(fresh, slice[0..new_len]);
+        allocator.free(slice);
+        break :blk fresh;
+    };
 }
 
 /// Convert VectorResult slice to RetrievalCandidate slice.

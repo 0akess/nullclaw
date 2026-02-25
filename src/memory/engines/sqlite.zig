@@ -673,6 +673,7 @@ pub const SqliteMemory = struct {
         const content = try dupeColumnText(stmt, 2, allocator);
         errdefer allocator.free(content);
         const cat_str = try dupeColumnText(stmt, 3, allocator);
+        errdefer allocator.free(cat_str);
         const timestamp = try dupeColumnText(stmt, 4, allocator);
         errdefer allocator.free(timestamp);
         const sid = try dupeColumnTextNullable(stmt, session_col, allocator);

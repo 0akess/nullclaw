@@ -98,11 +98,19 @@ pub const OpenAiEmbedding = struct {
 
     pub fn init(allocator: std.mem.Allocator, base_url: []const u8, api_key: []const u8, model: []const u8, dims: u32) !*Self {
         const self_ = try allocator.create(Self);
+        errdefer allocator.destroy(self_);
+
+        const owned_url = try allocator.dupe(u8, base_url);
+        errdefer allocator.free(owned_url);
+        const owned_key = try allocator.dupe(u8, api_key);
+        errdefer allocator.free(owned_key);
+        const owned_model = try allocator.dupe(u8, model);
+
         self_.* = .{
             .allocator = allocator,
-            .base_url = try allocator.dupe(u8, base_url),
-            .api_key = try allocator.dupe(u8, api_key),
-            .model = try allocator.dupe(u8, model),
+            .base_url = owned_url,
+            .api_key = owned_key,
+            .model = owned_model,
             .dims = dims,
         };
         return self_;
@@ -298,9 +306,32 @@ const SQLITE_STATIC = sqlite_mod.SQLITE_STATIC;
 
 /// Compute a content hash for embedding cache lookups.
 /// SHA-256 the content, take first 8 bytes, format as 16 hex characters.
+///
+/// IMPORTANT: For cache correctness, callers should use `contentHashWithModel`
+/// instead, which includes the model name in the hash. Using this function
+/// alone risks returning stale embeddings if the embedding model changes.
 pub fn contentHash(content: []const u8) [16]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
+
+    var result: [16]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (0..8) |i| {
+        result[i * 2] = hex_chars[digest[i] >> 4];
+        result[i * 2 + 1] = hex_chars[digest[i] & 0x0f];
+    }
+    return result;
+}
+
+/// Compute a content hash that includes the model name.
+/// This prevents returning stale cached embeddings when the model changes.
+pub fn contentHashWithModel(content: []const u8, model: []const u8) [16]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(model);
+    hasher.update("\x00"); // separator to prevent "modelAcontentB" == "modelAcontent" + "B"
+    hasher.update(content);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
 
     var result: [16]u8 = undefined;
     const hex_chars = "0123456789abcdef";
@@ -681,6 +712,25 @@ test "contentHash is deterministic" {
 test "contentHash differs for different inputs" {
     const h1 = contentHash("alpha");
     const h2 = contentHash("beta");
+    try std.testing.expect(!std.mem.eql(u8, &h1, &h2));
+}
+
+test "contentHashWithModel differs by model" {
+    const h1 = contentHashWithModel("same text", "text-embedding-3-small");
+    const h2 = contentHashWithModel("same text", "text-embedding-3-large");
+    try std.testing.expect(!std.mem.eql(u8, &h1, &h2));
+}
+
+test "contentHashWithModel same model same content is deterministic" {
+    const h1 = contentHashWithModel("hello", "model-a");
+    const h2 = contentHashWithModel("hello", "model-a");
+    try std.testing.expectEqualSlices(u8, &h1, &h2);
+}
+
+test "contentHashWithModel differs from contentHash" {
+    const h1 = contentHash("hello");
+    const h2 = contentHashWithModel("hello", "");
+    // Even with empty model, the null separator makes them differ
     try std.testing.expect(!std.mem.eql(u8, &h1, &h2));
 }
 

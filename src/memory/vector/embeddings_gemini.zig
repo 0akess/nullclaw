@@ -28,11 +28,19 @@ pub const GeminiEmbedding = struct {
         dims: ?u32,
     ) !*Self {
         const self_ = try allocator.create(Self);
+        errdefer allocator.destroy(self_);
+
+        const owned_url = try allocator.dupe(u8, base_url orelse default_base_url);
+        errdefer allocator.free(owned_url);
+        const owned_key = try allocator.dupe(u8, api_key);
+        errdefer allocator.free(owned_key);
+        const owned_model = try allocator.dupe(u8, model orelse default_model);
+
         self_.* = .{
             .allocator = allocator,
-            .base_url = try allocator.dupe(u8, base_url orelse default_base_url),
-            .api_key = try allocator.dupe(u8, api_key),
-            .model = try allocator.dupe(u8, model orelse default_model),
+            .base_url = owned_url,
+            .api_key = owned_key,
+            .model = owned_model,
             .dims = dims orelse default_dims,
         };
         return self_;

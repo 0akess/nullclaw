@@ -127,7 +127,8 @@ pub const InMemoryLruMemory = struct {
             return;
         }
 
-        // New entry — evict if at capacity.
+        // New entry — reject if capacity is zero, evict if at capacity.
+        if (self_.max_entries == 0) return;
         if (self_.entries.count() >= self_.max_entries) {
             self_.evictLru();
         }
@@ -220,6 +221,10 @@ pub const InMemoryLruMemory = struct {
             const dup_cat: MemoryCategory = switch (src.category) {
                 .custom => |name| .{ .custom = try allocator.dupe(u8, name) },
                 else => src.category,
+            };
+            errdefer switch (dup_cat) {
+                .custom => |name| allocator.free(name),
+                else => {},
             };
             const dup_ts = try allocator.dupe(u8, src.updated_at);
             errdefer allocator.free(dup_ts);

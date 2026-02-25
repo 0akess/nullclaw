@@ -12,6 +12,11 @@ const MemoryRuntime = memory_mod.MemoryRuntime;
 const DEFAULT_RECALL_LIMIT: usize = 5;
 const GLOBAL_RECALL_CANDIDATE_LIMIT: usize = 64;
 
+/// Maximum total bytes of memory context injected into a message.
+/// Prevents a few large entries from blowing the token budget.
+/// ~4000 chars ~ 1000 tokens — a safe ceiling for context injection.
+const MAX_CONTEXT_BYTES: usize = 4_000;
+
 fn containsKey(entries: []const MemoryEntry, key: []const u8) bool {
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.key, key)) return true;
@@ -60,12 +65,14 @@ pub fn loadContext(
             try w.writeAll("[Memory context]\n");
             wrote_header = true;
         }
-        try std.fmt.format(w, "- {s}: {s}\n", .{ entry.key, entry.content });
+        // Truncate individual entry content to prevent a single large memory from blowing the budget
+        const content = if (entry.content.len > MAX_CONTEXT_BYTES / 2) entry.content[0 .. MAX_CONTEXT_BYTES / 2] else entry.content;
+        try std.fmt.format(w, "- {s}: {s}\n", .{ entry.key, content });
         appended += 1;
-        if (appended >= DEFAULT_RECALL_LIMIT) break;
+        if (appended >= DEFAULT_RECALL_LIMIT or buf.items.len >= MAX_CONTEXT_BYTES) break;
     }
 
-    if (appended < DEFAULT_RECALL_LIMIT and session_id != null) {
+    if (appended < DEFAULT_RECALL_LIMIT and buf.items.len < MAX_CONTEXT_BYTES and session_id != null) {
         if (global_entries) |entries| {
             for (entries) |entry| {
                 if (entry.session_id != null) continue; // keep scoped isolation (no cross-session bleed)
@@ -75,9 +82,10 @@ pub fn loadContext(
                     try w.writeAll("[Memory context]\n");
                     wrote_header = true;
                 }
-                try std.fmt.format(w, "- {s}: {s}\n", .{ entry.key, entry.content });
+                const content = if (entry.content.len > MAX_CONTEXT_BYTES / 2) entry.content[0 .. MAX_CONTEXT_BYTES / 2] else entry.content;
+                try std.fmt.format(w, "- {s}: {s}\n", .{ entry.key, content });
                 appended += 1;
-                if (appended >= DEFAULT_RECALL_LIMIT) break;
+                if (appended >= DEFAULT_RECALL_LIMIT or buf.items.len >= MAX_CONTEXT_BYTES) break;
             }
         }
     }
@@ -112,7 +120,9 @@ pub fn loadContextWithRuntime(
     try w.writeAll("[Memory context]\n");
 
     for (candidates) |cand| {
-        try std.fmt.format(w, "- {s}: {s}\n", .{ cand.key, cand.snippet });
+        const snippet = if (cand.snippet.len > MAX_CONTEXT_BYTES / 2) cand.snippet[0 .. MAX_CONTEXT_BYTES / 2] else cand.snippet;
+        try std.fmt.format(w, "- {s}: {s}\n", .{ cand.key, snippet });
+        if (buf.items.len >= MAX_CONTEXT_BYTES) break;
     }
     try w.writeAll("\n");
 

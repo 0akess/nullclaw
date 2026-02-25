@@ -847,9 +847,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             if (query.get("max_results")) |v| if (v == .integer) {
                                 self.memory.search.query.max_results = @intCast(v.integer);
                             };
-                            if (query.get("min_score")) |v| if (v == .float) {
-                                self.memory.search.query.min_score = v.float;
-                            };
+                            if (query.get("min_score")) |v| {
+                                if (v == .float) self.memory.search.query.min_score = v.float;
+                                if (v == .integer) self.memory.search.query.min_score = @floatFromInt(v.integer);
+                            }
                             if (query.get("merge_strategy")) |v| if (v == .string) {
                                 self.memory.search.query.merge_strategy = try self.allocator.dupe(u8, v.string);
                             };
@@ -864,12 +865,14 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                     if (hybrid.get("enabled")) |v| if (v == .bool) {
                                         self.memory.search.query.hybrid.enabled = v.bool;
                                     };
-                                    if (hybrid.get("vector_weight")) |v| if (v == .float) {
-                                        self.memory.search.query.hybrid.vector_weight = v.float;
-                                    };
-                                    if (hybrid.get("text_weight")) |v| if (v == .float) {
-                                        self.memory.search.query.hybrid.text_weight = v.float;
-                                    };
+                                    if (hybrid.get("vector_weight")) |v| {
+                                        if (v == .float) self.memory.search.query.hybrid.vector_weight = v.float;
+                                        if (v == .integer) self.memory.search.query.hybrid.vector_weight = @floatFromInt(v.integer);
+                                    }
+                                    if (hybrid.get("text_weight")) |v| {
+                                        if (v == .float) self.memory.search.query.hybrid.text_weight = v.float;
+                                        if (v == .integer) self.memory.search.query.hybrid.text_weight = @floatFromInt(v.integer);
+                                    }
                                     if (hybrid.get("candidate_multiplier")) |v| if (v == .integer) {
                                         self.memory.search.query.hybrid.candidate_multiplier = @intCast(v.integer);
                                     };
@@ -881,9 +884,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                             if (mmr.get("enabled")) |v| if (v == .bool) {
                                                 self.memory.search.query.hybrid.mmr.enabled = v.bool;
                                             };
-                                            if (mmr.get("lambda")) |v| if (v == .float) {
-                                                self.memory.search.query.hybrid.mmr.lambda = v.float;
-                                            };
+                                            if (mmr.get("lambda")) |v| {
+                                                if (v == .float) self.memory.search.query.hybrid.mmr.lambda = v.float;
+                                                if (v == .integer) self.memory.search.query.hybrid.mmr.lambda = @floatFromInt(v.integer);
+                                            }
                                         }
                                     }
 

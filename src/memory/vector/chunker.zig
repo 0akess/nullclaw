@@ -22,7 +22,12 @@ pub const Chunk = struct {
 /// Token estimation: ~4 chars per token (rough English average).
 /// Caller owns the returned slices and must free them with freeChunks.
 pub fn chunkMarkdown(allocator: std.mem.Allocator, text: []const u8, max_tokens: usize) ![]Chunk {
-    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+    // Strip UTF-8 BOM if present (common in Windows-created files)
+    const debommed = if (text.len >= 3 and text[0] == 0xEF and text[1] == 0xBB and text[2] == 0xBF)
+        text[3..]
+    else
+        text;
+    const trimmed = std.mem.trim(u8, debommed, " \t\n\r");
     if (trimmed.len == 0) {
         return allocator.alloc(Chunk, 0);
     }
@@ -38,7 +43,7 @@ pub fn chunkMarkdown(allocator: std.mem.Allocator, text: []const u8, max_tokens:
         chunks.deinit(allocator);
     }
 
-    const sections = try splitOnHeadings(allocator, text);
+    const sections = try splitOnHeadings(allocator, trimmed);
     defer {
         for (sections) |sec| {
             if (sec.heading) |h| allocator.free(h);
@@ -472,4 +477,22 @@ test "chunk count reasonable for small doc" {
     const chunks_slice = try chunkMarkdown(std.testing.allocator, text, 512);
     defer freeChunks(std.testing.allocator, chunks_slice);
     try std.testing.expectEqual(@as(usize, 1), chunks_slice.len);
+}
+
+test "BOM stripped from start of text" {
+    // UTF-8 BOM: EF BB BF
+    const text = "\xEF\xBB\xBF# Title\nSome content.";
+    const chunks_slice = try chunkMarkdown(std.testing.allocator, text, 512);
+    defer freeChunks(std.testing.allocator, chunks_slice);
+    try std.testing.expect(chunks_slice.len >= 1);
+    // Heading should be detected despite BOM in original text
+    try std.testing.expect(chunks_slice[0].heading != null);
+    try std.testing.expectEqualStrings("# Title", chunks_slice[0].heading.?);
+}
+
+test "BOM only text treated as empty" {
+    const text = "\xEF\xBB\xBF";
+    const chunks_slice = try chunkMarkdown(std.testing.allocator, text, 512);
+    defer freeChunks(std.testing.allocator, chunks_slice);
+    try std.testing.expectEqual(@as(usize, 0), chunks_slice.len);
 }

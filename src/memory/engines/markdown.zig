@@ -65,18 +65,34 @@ pub const MarkdownMemory = struct {
     fn appendToFile(path: []const u8, content: []const u8, allocator: std.mem.Allocator) !void {
         try ensureDir(path);
 
-        const existing = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch "";
-        defer if (existing.len > 0) allocator.free(existing);
-
-        const new_content = if (existing.len == 0)
-            try std.fmt.allocPrint(allocator, "{s}\n", .{content})
-        else
-            try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ existing, content });
-        defer allocator.free(new_content);
-
-        const file = try std.fs.cwd().createFile(path, .{});
+        // Open (or create) without truncation and seek to end to append.
+        // This avoids the read-concat-rewrite pattern which loses data if
+        // the process crashes between truncation and write completion.
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
         defer file.close();
-        try file.writeAll(new_content);
+
+        const stat = try file.stat();
+        const size = stat.size;
+
+        try file.seekTo(size);
+
+        // If the file already has content and doesn't end with a newline,
+        // prepend one to keep entries on separate lines.
+        if (size > 0) {
+            try file.seekTo(size - 1);
+            var last_byte: [1]u8 = undefined;
+            const n = try file.read(&last_byte);
+            if (n == 1 and last_byte[0] != '\n') {
+                try file.seekTo(size);
+                try file.writeAll("\n");
+            } else {
+                try file.seekTo(size);
+            }
+        }
+
+        const line = try std.fmt.allocPrint(allocator, "{s}\n", .{content});
+        defer allocator.free(line);
+        try file.writeAll(line);
     }
 
     fn parseEntries(text: []const u8, filename: []const u8, category: MemoryCategory, allocator: std.mem.Allocator) ![]MemoryEntry {

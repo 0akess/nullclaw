@@ -33,6 +33,17 @@ pub const PgvectorConfig = struct {
     dimensions: u32,
 };
 
+/// Validate that a table name is a safe SQL identifier (alphanumeric + underscore, 1-63 chars).
+/// Prevents SQL injection via user-controlled table names.
+fn validateTableName(name: []const u8) !void {
+    if (name.len == 0 or name.len > 63) return error.InvalidTableName;
+    for (name) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return error.InvalidTableName;
+    }
+    // Must not start with a digit
+    if (std.ascii.isDigit(name[0])) return error.InvalidTableName;
+}
+
 // ── PgvectorVectorStore ───────────────────────────────────────────
 
 pub const PgvectorVectorStore = struct {
@@ -46,17 +57,28 @@ pub const PgvectorVectorStore = struct {
     const Self = @This();
 
     pub fn init(allocator: Allocator, config: PgvectorConfig) !*Self {
+        try validateTableName(config.table_name);
+
         const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+
+        const owned_url = try allocator.dupe(u8, config.connection_url);
+        errdefer allocator.free(owned_url);
+        const owned_table = try allocator.dupe(u8, config.table_name);
+        errdefer allocator.free(owned_table);
+
         self.* = .{
             .allocator = allocator,
-            .connection_url = try allocator.dupe(u8, config.connection_url),
-            .table_name = try allocator.dupe(u8, config.table_name),
+            .connection_url = owned_url,
+            .table_name = owned_table,
             .dimensions = config.dimensions,
             .conn = if (build_options.enable_postgres) null else {},
             .owns_self = true,
         };
 
         if (build_options.enable_postgres) {
+            // connect/ensureSchema may set self.conn; errdefer cleans it up
+            errdefer if (self.conn) |conn| c.PQfinish(conn);
             try self.connect();
             try self.ensureSchema();
         }
@@ -430,6 +452,29 @@ test "PgvectorVectorStore produces valid VectorStore vtable" {
     try std.testing.expect(s.vtable.health_check == &PgvectorVectorStore.implHealthCheck);
     try std.testing.expect(s.vtable.deinit == &PgvectorVectorStore.implDeinit);
     s.deinitStore();
+}
+
+test "validateTableName rejects SQL injection" {
+    // Valid names
+    try validateTableName("memory_vectors");
+    try validateTableName("my_table_123");
+
+    // SQL injection attempts
+    try std.testing.expectError(error.InvalidTableName, validateTableName("memory_vectors; DROP TABLE users;--"));
+    try std.testing.expectError(error.InvalidTableName, validateTableName("table name"));
+    try std.testing.expectError(error.InvalidTableName, validateTableName(""));
+    try std.testing.expectError(error.InvalidTableName, validateTableName("123starts_with_digit"));
+    try std.testing.expectError(error.InvalidTableName, validateTableName("has.dot"));
+    try std.testing.expectError(error.InvalidTableName, validateTableName("has-hyphen"));
+}
+
+test "PgvectorVectorStore init rejects bad table name" {
+    const result = PgvectorVectorStore.init(std.testing.allocator, .{
+        .connection_url = "postgresql://localhost/test",
+        .table_name = "bad; DROP TABLE users;--",
+        .dimensions = 768,
+    });
+    try std.testing.expectError(error.InvalidTableName, result);
 }
 
 test "PgvectorVectorStore healthCheck disabled returns not-ok" {

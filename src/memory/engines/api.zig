@@ -28,15 +28,23 @@ pub const ApiMemory = struct {
     const Self = @This();
 
     pub fn init(allocator: Allocator, config: config_types.MemoryApiConfig) !Self {
-        // Build base_url = url + namespace (strip trailing slash from url)
+        // Build base_url = url + namespace
+        // Strip trailing slashes; ensure namespace starts with /
         var url = config.url;
         if (url.len > 0 and url[url.len - 1] == '/') {
             url = url[0 .. url.len - 1];
         }
-        const base_url = if (config.namespace.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}{s}", .{ url, config.namespace })
-        else
-            try allocator.dupe(u8, url);
+        var ns = config.namespace;
+        if (ns.len > 0 and ns[ns.len - 1] == '/') {
+            ns = ns[0 .. ns.len - 1];
+        }
+        const base_url = if (ns.len > 0) blk: {
+            if (ns[0] == '/') {
+                break :blk try std.fmt.allocPrint(allocator, "{s}{s}", .{ url, ns });
+            } else {
+                break :blk try std.fmt.allocPrint(allocator, "{s}/{s}", .{ url, ns });
+            }
+        } else try allocator.dupe(u8, url);
         errdefer allocator.free(base_url);
 
         const api_key: ?[]const u8 = if (config.api_key.len > 0)
@@ -122,7 +130,9 @@ pub const ApiMemory = struct {
 
     fn buildMemoryUrl(self: *const Self, alloc: Allocator, key: ?[]const u8) ![]u8 {
         if (key) |k| {
-            return std.fmt.allocPrint(alloc, "{s}/memories/{s}", .{ self.base_url, k });
+            const encoded_key = try urlEncode(alloc, k);
+            defer alloc.free(encoded_key);
+            return std.fmt.allocPrint(alloc, "{s}/memories/{s}", .{ self.base_url, encoded_key });
         }
         return std.fmt.allocPrint(alloc, "{s}/memories", .{self.base_url});
     }
@@ -138,13 +148,13 @@ pub const ApiMemory = struct {
         if (category) |cat| {
             try buf.append(alloc, '?');
             try buf.appendSlice(alloc, "category=");
-            try buf.appendSlice(alloc, cat);
+            try appendUrlEncoded(&buf, alloc, cat);
             has_param = true;
         }
         if (session_id) |sid| {
             try buf.append(alloc, if (has_param) '&' else '?');
             try buf.appendSlice(alloc, "session_id=");
-            try buf.appendSlice(alloc, sid);
+            try appendUrlEncoded(&buf, alloc, sid);
         }
 
         return buf.toOwnedSlice(alloc);
@@ -163,12 +173,16 @@ pub const ApiMemory = struct {
     }
 
     fn buildSessionMessagesUrl(self: *const Self, alloc: Allocator, session_id: []const u8) ![]u8 {
-        return std.fmt.allocPrint(alloc, "{s}/sessions/{s}/messages", .{ self.base_url, session_id });
+        const encoded_sid = try urlEncode(alloc, session_id);
+        defer alloc.free(encoded_sid);
+        return std.fmt.allocPrint(alloc, "{s}/sessions/{s}/messages", .{ self.base_url, encoded_sid });
     }
 
     fn buildAutoSavedUrl(self: *const Self, alloc: Allocator, session_id: ?[]const u8) ![]u8 {
         if (session_id) |sid| {
-            return std.fmt.allocPrint(alloc, "{s}/sessions/auto-saved?session_id={s}", .{ self.base_url, sid });
+            const encoded_sid = try urlEncode(alloc, sid);
+            defer alloc.free(encoded_sid);
+            return std.fmt.allocPrint(alloc, "{s}/sessions/auto-saved?session_id={s}", .{ self.base_url, encoded_sid });
         }
         return std.fmt.allocPrint(alloc, "{s}/sessions/auto-saved", .{self.base_url});
     }
@@ -251,6 +265,27 @@ pub const ApiMemory = struct {
                 },
             }
         }
+    }
+
+    // ── URL encoding ──────────────────────────────────────────────
+
+    fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), alloc: Allocator, text: []const u8) !void {
+        for (text) |ch| {
+            if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '~') {
+                try buf.append(alloc, ch);
+            } else {
+                var hex_buf: [3]u8 = undefined;
+                const hex = std.fmt.bufPrint(&hex_buf, "%{X:0>2}", .{ch}) catch unreachable;
+                try buf.appendSlice(alloc, hex);
+            }
+        }
+    }
+
+    fn urlEncode(alloc: Allocator, text: []const u8) ![]u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(alloc);
+        try appendUrlEncoded(&buf, alloc, text);
+        return buf.toOwnedSlice(alloc);
     }
 
     // ── Response parsers ─────────────────────────────────────────
@@ -438,7 +473,7 @@ pub const ApiMemory = struct {
         };
 
         return switch (count_val) {
-            .integer => |n| @intCast(n),
+            .integer => |n| if (n >= 0) @intCast(n) else return error.ApiInvalidResponse,
             else => return error.ApiInvalidResponse,
         };
     }
@@ -1076,4 +1111,60 @@ test "api parse entries with custom category" {
         .custom => |name| try std.testing.expectEqualStrings("my_custom", name),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "api namespace without leading slash" {
+    var mem = try ApiMemory.init(std.testing.allocator, .{
+        .url = "http://localhost:8080",
+        .namespace = "v1",
+    });
+    defer mem.deinit();
+    try std.testing.expectEqualStrings("http://localhost:8080/v1", mem.base_url);
+}
+
+test "api namespace with trailing slash" {
+    var mem = try ApiMemory.init(std.testing.allocator, .{
+        .url = "http://localhost:8080",
+        .namespace = "/v1/",
+    });
+    defer mem.deinit();
+    try std.testing.expectEqualStrings("http://localhost:8080/v1", mem.base_url);
+}
+
+test "api url encoding in path" {
+    const alloc = std.testing.allocator;
+    var mem = try ApiMemory.init(alloc, .{ .url = "http://localhost:8080" });
+    defer mem.deinit();
+
+    const url = try mem.buildMemoryUrl(alloc, "key with spaces");
+    defer alloc.free(url);
+    try std.testing.expectEqualStrings("http://localhost:8080/memories/key%20with%20spaces", url);
+}
+
+test "api url encoding in query params" {
+    const alloc = std.testing.allocator;
+    var mem = try ApiMemory.init(alloc, .{ .url = "http://localhost:8080" });
+    defer mem.deinit();
+
+    const url = try mem.buildMemoryUrlWithQuery(alloc, "custom&cat", "sess id=1");
+    defer alloc.free(url);
+    try std.testing.expectEqualStrings("http://localhost:8080/memories?category=custom%26cat&session_id=sess%20id%3D1", url);
+}
+
+test "api url encoding preserves safe chars" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try ApiMemory.appendUrlEncoded(&buf, alloc, "hello-world_2.0~test");
+    try std.testing.expectEqualStrings("hello-world_2.0~test", buf.items);
+}
+
+test "api parse count rejects negative" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"count":-1}
+    ;
+    const result = ApiMemory.parseCount(alloc, json);
+    try std.testing.expectError(error.ApiInvalidResponse, result);
 }

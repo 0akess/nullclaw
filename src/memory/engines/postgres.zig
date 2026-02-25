@@ -43,7 +43,8 @@ pub fn quoteIdentifier(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 
 /// Build a query by substituting {schema} and {table} placeholders.
 /// Uses pre-validated, pre-quoted identifiers.
-pub fn buildQuery(allocator: std.mem.Allocator, template: []const u8, schema_q: []const u8, table_q: []const u8) ![]u8 {
+/// Returns a null-terminated slice suitable for passing to libpq C functions.
+pub fn buildQuery(allocator: std.mem.Allocator, template: []const u8, schema_q: []const u8, table_q: []const u8) ![:0]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -61,7 +62,7 @@ pub fn buildQuery(allocator: std.mem.Allocator, template: []const u8, schema_q: 
         }
     }
 
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSliceSentinel(allocator, 0);
 }
 
 fn getNowTimestamp(allocator: std.mem.Allocator) ![]u8 {
@@ -214,7 +215,7 @@ const PostgresMemoryImpl = struct {
     fn migrate(self: *Self, raw_table: []const u8) !void {
         // raw_table is pre-validated (alphanumeric + underscore only) so safe for index names.
         // Index names must NOT use quoted identifiers, so we use raw_table directly.
-        const ddl = try std.fmt.allocPrint(self.allocator,
+        const ddl = try std.fmt.allocPrintZ(self.allocator,
             \\CREATE TABLE IF NOT EXISTS {s}.{s} (
             \\    id TEXT PRIMARY KEY,
             \\    key TEXT NOT NULL UNIQUE,
@@ -717,4 +718,12 @@ test "generateId format has dashes" {
     const id = try generateId(std.testing.allocator);
     defer std.testing.allocator.free(id);
     try std.testing.expect(std.mem.indexOf(u8, id, "-") != null);
+}
+
+test "buildQuery returns null-terminated string" {
+    const result = try buildQuery(std.testing.allocator, "SELECT * FROM {schema}.{table}", "\"public\"", "\"memories\"");
+    defer std.testing.allocator.free(result);
+    // Verify null sentinel at position result.len
+    try std.testing.expectEqual(@as(u8, 0), result[result.len]);
+    try std.testing.expectEqualStrings("SELECT * FROM \"public\".\"memories\"", result);
 }

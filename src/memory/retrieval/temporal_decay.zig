@@ -69,7 +69,10 @@ pub fn applyTemporalDecay(
         // Skip entries with no known timestamp
         if (c.created_at == 0) continue;
 
-        const age_secs: f64 = @floatFromInt(@max(@as(i64, 0), now_timestamp - c.created_at));
+        // Use wrapping subtraction to avoid overflow panic when timestamps
+        // are at extreme i64 values, then clamp negative ages to 0.
+        const age_secs_raw = now_timestamp -% c.created_at;
+        const age_secs: f64 = if (age_secs_raw < 0) 0.0 else @floatFromInt(age_secs_raw);
         const age_days = age_secs / secs_per_day;
         const decay = @exp(-lambda * age_days);
         c.final_score *= decay;
