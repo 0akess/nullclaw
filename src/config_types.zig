@@ -424,7 +424,37 @@ pub const ChannelsConfig = struct {
 
 // ── Memory config ───────────────────────────────────────────────
 
+/// Memory configuration profile presets.
+pub const MemoryProfile = enum {
+    /// SQLite keyword-only (default).
+    local_keyword,
+    /// File-based markdown memory.
+    markdown_only,
+    /// PostgreSQL keyword-only.
+    postgres_keyword,
+    /// SQLite + vector hybrid.
+    local_hybrid,
+    /// PostgreSQL + vector hybrid.
+    postgres_hybrid,
+    /// Stateless no-op.
+    minimal_none,
+    /// Custom — no profile defaults applied.
+    custom,
+
+    pub fn fromString(s: []const u8) MemoryProfile {
+        if (std.mem.eql(u8, s, "local_keyword")) return .local_keyword;
+        if (std.mem.eql(u8, s, "markdown_only")) return .markdown_only;
+        if (std.mem.eql(u8, s, "postgres_keyword")) return .postgres_keyword;
+        if (std.mem.eql(u8, s, "local_hybrid")) return .local_hybrid;
+        if (std.mem.eql(u8, s, "postgres_hybrid")) return .postgres_hybrid;
+        if (std.mem.eql(u8, s, "minimal_none")) return .minimal_none;
+        return .custom;
+    }
+};
+
 pub const MemoryConfig = struct {
+    /// Profile preset — convenience shortcut for common setups.
+    profile: []const u8 = "local_keyword",
     backend: []const u8 = "sqlite",
     auto_save: bool = true,
     citations: []const u8 = "auto",
@@ -434,6 +464,9 @@ pub const MemoryConfig = struct {
     response_cache: MemoryResponseCacheConfig = .{},
     reliability: MemoryReliabilityConfig = .{},
     postgres: MemoryPostgresConfig = .{},
+    redis: MemoryRedisConfig = .{},
+    retrieval_stages: MemoryRetrievalStagesConfig = .{},
+    summarizer: MemorySummarizerConfig = .{},
 };
 
 pub const MemorySearchConfig = struct {
@@ -501,7 +534,9 @@ pub const MemoryVectorStoreConfig = struct {
     kind: []const u8 = "auto",
     sidecar_path: []const u8 = "",
     qdrant_url: []const u8 = "",
+    qdrant_api_key: []const u8 = "",
     qdrant_collection: []const u8 = "nullclaw_memories",
+    pgvector_table: []const u8 = "memory_embeddings",
 };
 
 pub const MemoryChunkingConfig = struct {
@@ -578,6 +613,32 @@ pub const MemoryPostgresConfig = struct {
     schema: []const u8 = "public",
     table: []const u8 = "memories",
     connect_timeout_secs: u32 = 30,
+};
+
+pub const MemoryRedisConfig = struct {
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 6379,
+    password: []const u8 = "",
+    db_index: u8 = 0,
+    key_prefix: []const u8 = "nullclaw",
+    ttl_seconds: u32 = 0, // 0 = no expiry
+};
+
+pub const MemoryRetrievalStagesConfig = struct {
+    query_expansion_enabled: bool = false,
+    adaptive_retrieval_enabled: bool = false,
+    adaptive_keyword_max_tokens: u32 = 3,
+    adaptive_vector_min_tokens: u32 = 6,
+    llm_reranker_enabled: bool = false,
+    llm_reranker_max_candidates: u32 = 10,
+    llm_reranker_timeout_ms: u32 = 5_000,
+};
+
+pub const MemorySummarizerConfig = struct {
+    enabled: bool = false,
+    window_size_tokens: u32 = 4000,
+    summary_max_tokens: u32 = 500,
+    auto_extract_semantic: bool = true,
 };
 
 // ── Tunnel config ───────────────────────────────────────────────

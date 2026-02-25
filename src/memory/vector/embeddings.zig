@@ -7,6 +7,9 @@
 //!   - Factory function: createEmbeddingProvider()
 
 const std = @import("std");
+const GeminiEmbedding = @import("embeddings_gemini.zig").GeminiEmbedding;
+const VoyageEmbedding = @import("embeddings_voyage.zig").VoyageEmbedding;
+const OllamaEmbedding = @import("embeddings_ollama.zig").OllamaEmbedding;
 
 // ── Embedding provider vtable ─────────────────────────────────────
 
@@ -437,6 +440,38 @@ pub fn createEmbeddingProvider(
         return impl_.provider();
     }
 
+    if (std.mem.eql(u8, provider_name, "gemini")) {
+        var impl_ = try GeminiEmbedding.init(
+            allocator,
+            api_key orelse "",
+            if (model.len > 0) model else null,
+            null,
+            if (dims > 0) dims else null,
+        );
+        return impl_.provider();
+    }
+
+    if (std.mem.eql(u8, provider_name, "voyage")) {
+        var impl_ = try VoyageEmbedding.init(
+            allocator,
+            api_key orelse "",
+            if (model.len > 0) model else null,
+            null,
+            if (dims > 0) dims else null,
+        );
+        return impl_.provider();
+    }
+
+    if (std.mem.eql(u8, provider_name, "ollama")) {
+        var impl_ = try OllamaEmbedding.init(
+            allocator,
+            if (model.len > 0) model else null,
+            null,
+            if (dims > 0) dims else null,
+        );
+        return impl_.provider();
+    }
+
     if (std.mem.startsWith(u8, provider_name, "custom:")) {
         const base_url = provider_name[7..];
         var impl_ = try OpenAiEmbedding.init(
@@ -581,6 +616,48 @@ test "createEmbeddingProvider openai is heap allocated and deinit frees memory" 
     try std.testing.expectEqualStrings("openai", p.getName());
     try std.testing.expectEqual(@as(u32, 1536), p.getDimensions());
     // deinit must free all allocations without crashing.
+    p.deinit();
+}
+
+test "createEmbeddingProvider gemini" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "gemini", "test-key", "", 0);
+    try std.testing.expectEqualStrings("gemini", p.getName());
+    try std.testing.expectEqual(@as(u32, 768), p.getDimensions());
+    p.deinit();
+}
+
+test "createEmbeddingProvider gemini with custom model" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "gemini", "test-key", "gemini-embedding-001", 1024);
+    try std.testing.expectEqualStrings("gemini", p.getName());
+    try std.testing.expectEqual(@as(u32, 1024), p.getDimensions());
+    p.deinit();
+}
+
+test "createEmbeddingProvider voyage" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "voyage", "test-key", "", 0);
+    try std.testing.expectEqualStrings("voyage", p.getName());
+    try std.testing.expectEqual(@as(u32, 512), p.getDimensions());
+    p.deinit();
+}
+
+test "createEmbeddingProvider voyage with custom model" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "voyage", "test-key", "voyage-3", 1024);
+    try std.testing.expectEqualStrings("voyage", p.getName());
+    try std.testing.expectEqual(@as(u32, 1024), p.getDimensions());
+    p.deinit();
+}
+
+test "createEmbeddingProvider ollama" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "ollama", null, "", 0);
+    try std.testing.expectEqualStrings("ollama", p.getName());
+    try std.testing.expectEqual(@as(u32, 768), p.getDimensions());
+    p.deinit();
+}
+
+test "createEmbeddingProvider ollama with custom model" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "ollama", null, "mxbai-embed-large", 1024);
+    try std.testing.expectEqualStrings("ollama", p.getName());
+    try std.testing.expectEqual(@as(u32, 1024), p.getDimensions());
     p.deinit();
 }
 

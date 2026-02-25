@@ -30,15 +30,78 @@
   },
 
   "memory": {
+    "profile": "local_keyword",
     "backend": "sqlite",
     "auto_save": true,
-    "lifecycle": {
-      "hygiene_enabled": true
+
+    "search": {
+      "enabled": true,
+      "provider": "none",
+      "model": "text-embedding-3-small",
+      "dimensions": 1536,
+      "store": {
+        "kind": "auto",
+        "qdrant_url": "",
+        "qdrant_api_key": "",
+        "qdrant_collection": "nullclaw_memories",
+        "pgvector_table": "memory_embeddings"
+      },
+      "query": {
+        "max_results": 6,
+        "min_score": 0.0,
+        "merge_strategy": "rrf",
+        "rrf_k": 60,
+        "hybrid": {
+          "enabled": false,
+          "vector_weight": 0.7,
+          "text_weight": 0.3,
+          "mmr": { "enabled": false, "lambda": 0.7 },
+          "temporal_decay": { "enabled": false, "half_life_days": 30 }
+        }
+      }
     },
+
+    "retrieval_stages": {
+      "query_expansion_enabled": false,
+      "adaptive_retrieval_enabled": false,
+      "llm_reranker_enabled": false,
+      "llm_reranker_max_candidates": 10
+    },
+
+    "lifecycle": {
+      "hygiene_enabled": true,
+      "snapshot_enabled": false,
+      "auto_hydrate": true
+    },
+
+    "response_cache": {
+      "enabled": false,
+      "ttl_minutes": 60,
+      "max_entries": 5000
+    },
+
+    "reliability": {
+      "rollout_mode": "off",
+      "circuit_breaker_failures": 5,
+      "circuit_breaker_cooldown_ms": 30000
+    },
+
+    "summarizer": {
+      "enabled": false,
+      "window_size_tokens": 4000,
+      "summary_max_tokens": 500
+    },
+
     "postgres": {
       "url": "postgresql://user:pass@localhost:5432/nullclaw",
       "schema": "public",
       "table": "memories"
+    },
+
+    "redis": {
+      "host": "127.0.0.1",
+      "port": 6379,
+      "key_prefix": "nullclaw"
     }
   },
 

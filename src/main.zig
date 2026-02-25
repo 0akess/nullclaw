@@ -1040,6 +1040,9 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     // Initialize session manager
     var session_mgr = yc.session.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
     session_mgr.policy = &sec_policy;
+    if (mem_rt) |*rt| {
+        session_mgr.mem_rt = rt;
+    }
     defer session_mgr.deinit();
 
     // Session key buffer
@@ -1319,6 +1322,9 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
 
     var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
     session_mgr.policy = &sec_policy;
+    if (mem_rt) |*rt| {
+        session_mgr.mem_rt = rt;
+    }
     defer session_mgr.deinit();
 
     var typing = yc.channels.telegram.TypingIndicator.init(&tg);

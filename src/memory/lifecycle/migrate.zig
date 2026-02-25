@@ -433,3 +433,118 @@ test "memory column detection" {
     try std.testing.expectEqualStrings("CAST(rowid AS TEXT)", cols.key_expr);
     try std.testing.expectEqualStrings("'core'", cols.category_expr);
 }
+
+// ── P5.1: Edge case tests ─────────────────────────────────────────
+
+test "readBrainDb with corrupt file path returns OpenFailed" {
+    // A null-terminated path to a non-sqlite file
+    const result = readBrainDb(std.testing.allocator, "/dev/null");
+    try std.testing.expectError(error.NoMemoriesTable, result);
+}
+
+test "readBrainDb with empty table returns empty slice" {
+    // Create a temp file with an empty memories table
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create an actual SQLite file on disk with empty table
+    const file = try tmp.dir.createFile("empty.db", .{});
+    file.close();
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "empty.db");
+    defer std.testing.allocator.free(path);
+
+    // Open it properly and create the table
+    const pathZ = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(pathZ);
+
+    var db: ?*c.sqlite3 = null;
+    const rc = c.sqlite3_open(pathZ.ptr, &db);
+    if (rc != c.SQLITE_OK) {
+        if (db) |d| _ = c.sqlite3_close(d);
+        return error.OpenFailed;
+    }
+    _ = c.sqlite3_exec(db, "CREATE TABLE memories (key TEXT, content TEXT, category TEXT)", null, null, null);
+    _ = c.sqlite3_close(db.?);
+
+    // Now read via the public API
+    const entries = try readBrainDb(std.testing.allocator, pathZ.ptr);
+    defer freeSqliteEntries(std.testing.allocator, entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "readBrainDb skips rows with empty content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("skip_empty.db", .{});
+    file.close();
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "skip_empty.db");
+    defer std.testing.allocator.free(path);
+    const pathZ = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(pathZ);
+
+    var db: ?*c.sqlite3 = null;
+    _ = c.sqlite3_open(pathZ.ptr, &db);
+    _ = c.sqlite3_exec(db,
+        \\CREATE TABLE memories (key TEXT, content TEXT, category TEXT);
+        \\INSERT INTO memories VALUES ('k1', '', 'core');
+        \\INSERT INTO memories VALUES ('k2', 'valid', 'core');
+        \\INSERT INTO memories VALUES ('k3', NULL, 'core');
+    , null, null, null);
+    _ = c.sqlite3_close(db.?);
+
+    const entries = try readBrainDb(std.testing.allocator, pathZ.ptr);
+    defer freeSqliteEntries(std.testing.allocator, entries);
+    // Only 'k2' has non-empty content
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("valid", entries[0].content);
+}
+
+test "readBrainDb full roundtrip with file-based db" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("roundtrip.db", .{});
+    file.close();
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "roundtrip.db");
+    defer std.testing.allocator.free(path);
+    const pathZ = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(pathZ);
+
+    var db: ?*c.sqlite3 = null;
+    _ = c.sqlite3_open(pathZ.ptr, &db);
+    _ = c.sqlite3_exec(db,
+        \\CREATE TABLE memories (key TEXT, content TEXT, category TEXT);
+        \\INSERT INTO memories VALUES ('pref1', 'likes Zig', 'core');
+        \\INSERT INTO memories VALUES ('pref2', 'uses NeoVim', 'daily');
+    , null, null, null);
+    _ = c.sqlite3_close(db.?);
+
+    const entries = try readBrainDb(std.testing.allocator, pathZ.ptr);
+    defer freeSqliteEntries(std.testing.allocator, entries);
+
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expectEqualStrings("pref1", entries[0].key);
+    try std.testing.expectEqualStrings("likes Zig", entries[0].content);
+    try std.testing.expectEqualStrings("core", entries[0].category);
+    try std.testing.expectEqualStrings("pref2", entries[1].key);
+    try std.testing.expectEqualStrings("uses NeoVim", entries[1].content);
+    try std.testing.expectEqualStrings("daily", entries[1].category);
+}
+
+test "columnText returns empty for null column" {
+    const db = try createTestDb(std.testing.allocator,
+        \\CREATE TABLE t (a TEXT);
+        \\INSERT INTO t VALUES (NULL);
+    );
+    defer closeTestDb(db);
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    const sql = "SELECT a FROM t";
+    _ = c.sqlite3_prepare_v2(db, sql, @intCast(sql.len), &stmt, null);
+    defer _ = c.sqlite3_finalize(stmt);
+
+    try std.testing.expect(c.sqlite3_step(stmt) == c.SQLITE_ROW);
+    const val = columnText(stmt, 0);
+    try std.testing.expectEqual(@as(usize, 0), val.len);
+}

@@ -15,7 +15,50 @@ const rrf = @import("rrf.zig");
 const vector_store_mod = @import("../vector/store.zig");
 const circuit_breaker_mod = @import("../vector/circuit_breaker.zig");
 const embeddings_mod = @import("../vector/embeddings.zig");
+const temporal_decay_mod = @import("temporal_decay.zig");
+const mmr_mod = @import("mmr.zig");
+const query_expansion_mod = @import("query_expansion.zig");
+const adaptive_mod = @import("adaptive.zig");
+const llm_reranker_mod = @import("llm_reranker.zig");
 const log = std.log.scoped(.retrieval);
+
+// ── Pipeline stage ordering ──────────────────────────────────────
+
+/// Retrieval pipeline stages in execution order.
+/// Each stage transforms the candidate list in a deterministic sequence.
+pub const RetrievalStage = enum {
+    /// Stage 0: Query expansion (stopword filtering, FTS5 optimization)
+    query_expansion,
+    /// Stage 1: Keyword search across all sources
+    keyword,
+    /// Stage 2: Vector/embedding search (if hybrid enabled)
+    vector,
+    /// Stage 3: Merge keyword + vector via RRF
+    merge_rrf,
+    /// Stage 4: Apply minimum relevance threshold
+    min_relevance,
+    /// Stage 5: Apply temporal decay to older memories
+    temporal_decay,
+    /// Stage 6: MMR diversity reranking
+    mmr,
+    /// Stage 7: LLM reranker (optional, requires callback)
+    llm_rerank,
+    /// Stage 8: Final limit/truncation
+    limit,
+};
+
+/// The canonical pipeline order. All stages execute in this sequence.
+pub const pipeline_order = [_]RetrievalStage{
+    .query_expansion,
+    .keyword,
+    .vector,
+    .merge_rrf,
+    .min_relevance,
+    .temporal_decay,
+    .mmr,
+    .llm_rerank,
+    .limit,
+};
 
 // ── RetrievalCandidate ─────────────────────────────────────────────
 
@@ -32,6 +75,7 @@ pub const RetrievalCandidate = struct {
     source_path: []const u8,
     start_line: u32,
     end_line: u32,
+    created_at: i64 = 0,
 
     pub fn deinit(self: *const RetrievalCandidate, allocator: Allocator) void {
         allocator.free(self.id);
@@ -82,6 +126,8 @@ pub fn entriesToCandidates(allocator: Allocator, entries: []const MemoryEntry) !
             else => entry.category,
         };
 
+        const created_at: i64 = std.fmt.parseInt(i64, entry.timestamp, 10) catch 0;
+
         result[i] = .{
             .id = id,
             .key = key,
@@ -95,6 +141,7 @@ pub fn entriesToCandidates(allocator: Allocator, entries: []const MemoryEntry) !
             .source_path = source_path,
             .start_line = 0,
             .end_line = 0,
+            .created_at = created_at,
         };
     }
 
@@ -226,6 +273,20 @@ pub const RetrievalEngine = struct {
     circuit_breaker: ?*circuit_breaker_mod.CircuitBreaker = null,
     hybrid_cfg: config_types.MemoryHybridConfig = .{},
 
+    // Post-processing stage configs
+    temporal_decay_cfg: config_types.MemoryTemporalDecayConfig = .{},
+    mmr_cfg: config_types.MemoryMmrConfig = .{},
+
+    // Extended pipeline stages (configured via MemoryRetrievalStagesConfig)
+    query_expansion_enabled: bool = false,
+    adaptive_cfg: adaptive_mod.AdaptiveConfig = .{},
+    llm_reranker_cfg: llm_reranker_mod.LlmRerankerConfig = .{},
+
+    /// Optional callback for LLM reranking. If set and llm_reranker is enabled,
+    /// the engine calls this with a prompt and expects ranked indices in response.
+    /// Signature: fn(allocator, prompt) -> response_text or error
+    llm_rerank_fn: ?*const fn (Allocator, []const u8) anyerror![]const u8 = null,
+
     const Self = @This();
 
     pub fn init(allocator: Allocator, query_cfg: config_types.MemoryQueryConfig) RetrievalEngine {
@@ -235,6 +296,23 @@ pub const RetrievalEngine = struct {
             .merge_k = query_cfg.rrf_k,
             .top_k = query_cfg.max_results,
             .min_score = query_cfg.min_score,
+            .temporal_decay_cfg = query_cfg.hybrid.temporal_decay,
+            .mmr_cfg = query_cfg.hybrid.mmr,
+        };
+    }
+
+    /// Configure extended pipeline stages from retrieval stages config.
+    pub fn setRetrievalStages(self: *RetrievalEngine, stages_cfg: config_types.MemoryRetrievalStagesConfig) void {
+        self.query_expansion_enabled = stages_cfg.query_expansion_enabled;
+        self.adaptive_cfg = .{
+            .enabled = stages_cfg.adaptive_retrieval_enabled,
+            .keyword_max_tokens = stages_cfg.adaptive_keyword_max_tokens,
+            .vector_min_tokens = stages_cfg.adaptive_vector_min_tokens,
+        };
+        self.llm_reranker_cfg = .{
+            .enabled = stages_cfg.llm_reranker_enabled,
+            .max_candidates = stages_cfg.llm_reranker_max_candidates,
+            .timeout_ms = stages_cfg.llm_reranker_timeout_ms,
         };
     }
 
@@ -256,7 +334,7 @@ pub const RetrievalEngine = struct {
         self.hybrid_cfg = hybrid;
     }
 
-    /// Run keyword search across all sources, merge with RRF, filter, truncate.
+    /// Run the full retrieval pipeline: query expansion → keyword → vector → RRF → post-processing → limit.
     pub fn search(
         self: *RetrievalEngine,
         allocator: Allocator,
@@ -267,9 +345,40 @@ pub const RetrievalEngine = struct {
             return allocator.alloc(RetrievalCandidate, 0);
         }
 
+        // ── Stage 0: Query expansion ──
+        // If enabled, expand query for better FTS keyword matching.
+        // The original query is kept for vector embedding.
+        var expanded: ?query_expansion_mod.ExpandedQuery = null;
+        defer if (expanded) |*eq| eq.deinit(allocator);
+
+        const keyword_query: []const u8 = if (self.query_expansion_enabled) blk: {
+            expanded = query_expansion_mod.expandQuery(allocator, query) catch |err| {
+                log.warn("query expansion failed, using raw query: {}", .{err});
+                break :blk query;
+            };
+            const eq = &expanded.?;
+            if (eq.fts5_query.len > 0) {
+                log.debug("query expanded: '{s}' -> '{s}' (lang={s})", .{
+                    query,
+                    eq.fts5_query,
+                    @tagName(eq.language),
+                });
+                break :blk eq.fts5_query;
+            }
+            break :blk query;
+        } else query;
+
+        // ── Adaptive retrieval strategy ──
+        // Decides whether to run vector search alongside keyword search.
+        const strategy = adaptive_mod.analyzeQuery(query, self.adaptive_cfg);
+        const run_vector = switch (strategy.recommended_strategy) {
+            .keyword_only => false,
+            .vector_only, .hybrid => true,
+        };
+
         const fetch_limit = self.top_k * 2;
 
-        // Collect results from all sources
+        // ── Stage 1: Keyword search ──
         var source_results = try allocator.alloc([]RetrievalCandidate, self.sources.items.len);
         defer allocator.free(source_results);
 
@@ -277,7 +386,7 @@ pub const RetrievalEngine = struct {
 
         for (self.sources.items, 0..) |source, i| {
             const is_primary = std.mem.eql(u8, source.getName(), "primary");
-            source_results[i] = source.keywordCandidates(allocator, query, fetch_limit, session_id) catch |err| {
+            source_results[i] = source.keywordCandidates(allocator, keyword_query, fetch_limit, session_id) catch |err| {
                 if (is_primary) {
                     log.err("primary source search failed: {}", .{err});
                     // Free any previously collected results
@@ -306,7 +415,8 @@ pub const RetrievalEngine = struct {
         var vector_candidates: ?[]RetrievalCandidate = null;
         defer if (vector_candidates) |vc| freeCandidates(allocator, vc);
 
-        if (self.hybrid_cfg.enabled) hybrid_blk: {
+        if (self.hybrid_cfg.enabled and run_vector) hybrid_blk: {
+            log.debug("shadow/hybrid path active: running vector search alongside keyword (sources={d})", .{self.sources.items.len});
             const provider = self.embedding_provider orelse break :hybrid_blk;
             const vs = self.vector_store orelse break :hybrid_blk;
 
@@ -358,7 +468,7 @@ pub const RetrievalEngine = struct {
             // Find the one with results
             for (source_results) |sr| {
                 if (sr.len > 0) {
-                    const out_len = @min(sr.len, @as(usize, self.top_k));
+                    const out_len = sr.len;
                     var result = try allocator.alloc(RetrievalCandidate, out_len);
                     errdefer allocator.free(result);
 
@@ -369,33 +479,51 @@ pub const RetrievalEngine = struct {
                         else
                             1.0 / @as(f64, @floatFromInt(j + 1 + self.merge_k));
 
-                        if (score >= self.min_score) {
-                            result[actual_len] = sr[j];
-                            result[actual_len].final_score = score;
-                            // Zero out the source entry so it doesn't get freed in defer
-                            sr[j] = .{
-                                .id = "",
-                                .key = "",
-                                .content = "",
-                                .snippet = "",
-                                .category = .core,
-                                .keyword_rank = null,
-                                .vector_score = null,
-                                .final_score = 0.0,
-                                .source = "",
-                                .source_path = "",
-                                .start_line = 0,
-                                .end_line = 0,
-                            };
-                            actual_len += 1;
-                        }
+                        result[actual_len] = sr[j];
+                        result[actual_len].final_score = score;
+                        // Zero out the source entry so it doesn't get freed in defer
+                        sr[j] = .{
+                            .id = "",
+                            .key = "",
+                            .content = "",
+                            .snippet = "",
+                            .category = .core,
+                            .keyword_rank = null,
+                            .vector_score = null,
+                            .final_score = 0.0,
+                            .source = "",
+                            .source_path = "",
+                            .start_line = 0,
+                            .end_line = 0,
+                        };
+                        actual_len += 1;
                     }
 
                     if (actual_len < result.len) {
-                        // Free unused slots (they're still zeroed out so deinit is safe)
-                        return allocator.realloc(result, actual_len);
+                        result = allocator.realloc(result, actual_len) catch result[0..actual_len];
                     }
-                    return result;
+
+                    // Apply pipeline stages 4-8
+                    var merged = result;
+                    merged = applyMinRelevance(allocator, merged, self.min_score);
+                    temporal_decay_mod.applyTemporalDecay(merged, self.temporal_decay_cfg, std.time.timestamp());
+
+                    if (self.mmr_cfg.enabled and merged.len > 1) {
+                        const reranked = mmr_mod.applyMmr(allocator, merged, self.mmr_cfg, self.top_k) catch merged;
+                        if (reranked.ptr != merged.ptr) {
+                            freeCandidates(allocator, merged);
+                            merged = reranked;
+                        }
+                    }
+
+                    merged = self.applyLlmRerank(allocator, merged, query);
+
+                    if (merged.len > self.top_k) {
+                        for (merged[self.top_k..]) |*over| over.deinit(allocator);
+                        merged = allocator.realloc(merged, self.top_k) catch merged[0..self.top_k];
+                    }
+
+                    return merged;
                 }
             }
             // All empty
@@ -415,27 +543,98 @@ pub const RetrievalEngine = struct {
             rrf_sources[source_results.len] = vector_candidates.?;
         }
 
-        var merged = try rrf.rrfMerge(allocator, rrf_sources, self.merge_k, self.top_k);
+        var merged = try rrf.rrfMerge(allocator, rrf_sources, self.merge_k, self.top_k * 4);
 
-        // Filter by min_score
-        if (self.min_score > 0.0) {
-            var keep: usize = 0;
-            for (merged) |*c| {
-                if (c.final_score >= self.min_score) {
-                    if (keep != @as(usize, @intFromPtr(c) -% @intFromPtr(merged.ptr)) / @sizeOf(RetrievalCandidate)) {
-                        merged[keep] = c.*;
-                    }
-                    keep += 1;
-                } else {
-                    c.deinit(allocator);
-                }
-            }
-            if (keep < merged.len) {
-                merged = allocator.realloc(merged, keep) catch merged[0..keep];
+        // ── Stage 4: min_relevance ──
+        merged = applyMinRelevance(allocator, merged, self.min_score);
+
+        // ── Stage 5: temporal_decay ──
+        temporal_decay_mod.applyTemporalDecay(merged, self.temporal_decay_cfg, std.time.timestamp());
+
+        // ── Stage 6: MMR diversity reranking ──
+        if (self.mmr_cfg.enabled and merged.len > 1) {
+            const reranked = mmr_mod.applyMmr(allocator, merged, self.mmr_cfg, self.top_k) catch merged;
+            if (reranked.ptr != merged.ptr) {
+                freeCandidates(allocator, merged);
+                merged = reranked;
             }
         }
 
+        // ── Stage 7: LLM reranker ──
+        merged = self.applyLlmRerank(allocator, merged, query);
+
+        // ── Stage 8: final limit ──
+        if (merged.len > self.top_k) {
+            for (merged[self.top_k..]) |*over| over.deinit(allocator);
+            merged = allocator.realloc(merged, self.top_k) catch merged[0..self.top_k];
+        }
+
         return merged;
+    }
+
+    /// Apply LLM reranking if enabled and callback is set.
+    /// Returns the (possibly reordered) candidates slice.
+    fn applyLlmRerank(self: *RetrievalEngine, allocator: Allocator, candidates: []RetrievalCandidate, query: []const u8) []RetrievalCandidate {
+        if (!self.llm_reranker_cfg.enabled or candidates.len <= 1) return candidates;
+        const rerank_fn = self.llm_rerank_fn orelse return candidates;
+
+        const prompt = llm_reranker_mod.buildRerankPrompt(
+            allocator,
+            query,
+            candidates,
+            self.llm_reranker_cfg.max_candidates,
+        ) catch |err| {
+            log.warn("LLM reranker prompt build failed: {}", .{err});
+            return candidates;
+        };
+        defer allocator.free(prompt);
+
+        if (prompt.len == 0) return candidates;
+
+        const response = rerank_fn(allocator, prompt) catch |err| {
+            log.warn("LLM reranker call failed: {}", .{err});
+            return candidates;
+        };
+        defer allocator.free(response);
+
+        const ranked_indices = llm_reranker_mod.parseRerankResponse(
+            allocator,
+            response,
+            candidates.len,
+        ) catch |err| {
+            log.warn("LLM reranker parse failed: {}", .{err});
+            return candidates;
+        };
+        defer allocator.free(ranked_indices);
+
+        if (ranked_indices.len == 0) return candidates;
+
+        // Reorder candidates in-place based on ranked indices (1-based)
+        var reordered = allocator.alloc(RetrievalCandidate, ranked_indices.len) catch return candidates;
+        for (ranked_indices, 0..) |idx, i| {
+            if (idx >= 1 and idx <= candidates.len) {
+                reordered[i] = candidates[idx - 1];
+                // Update final_score to reflect new rank
+                reordered[i].final_score = 1.0 / @as(f64, @floatFromInt(i + 1));
+            }
+        }
+        // Free unused candidates not in the reordered set
+        var used = allocator.alloc(bool, candidates.len) catch {
+            allocator.free(reordered);
+            return candidates;
+        };
+        defer allocator.free(used);
+        @memset(used, false);
+        for (ranked_indices) |idx| {
+            if (idx >= 1 and idx <= candidates.len) used[idx - 1] = true;
+        }
+        for (candidates, 0..) |*c, ci| {
+            if (!used[ci]) c.deinit(allocator);
+        }
+        allocator.free(candidates);
+
+        log.debug("LLM reranker applied: {d} candidates reordered", .{reordered.len});
+        return reordered;
     }
 
     pub fn deinit(self: *RetrievalEngine) void {
@@ -445,6 +644,29 @@ pub const RetrievalEngine = struct {
         self.sources.deinit(self.allocator);
     }
 };
+
+/// Filter candidates below min_score threshold.
+/// Returns the (possibly shrunk) slice. Freed entries are deinited.
+fn applyMinRelevance(allocator: Allocator, candidates: []RetrievalCandidate, min_score: f64) []RetrievalCandidate {
+    var merged = candidates;
+    if (min_score > 0.0) {
+        var keep: usize = 0;
+        for (merged) |*ca| {
+            if (ca.final_score >= min_score) {
+                if (keep != @as(usize, @intFromPtr(ca) -% @intFromPtr(merged.ptr)) / @sizeOf(RetrievalCandidate)) {
+                    merged[keep] = ca.*;
+                }
+                keep += 1;
+            } else {
+                ca.deinit(allocator);
+            }
+        }
+        if (keep < merged.len) {
+            merged = allocator.realloc(merged, keep) catch merged[0..keep];
+        }
+    }
+    return merged;
+}
 
 /// Convert VectorResult slice to RetrievalCandidate slice.
 /// Each result gets source="vector", vector_score set, content=key (minimal).
@@ -905,9 +1127,50 @@ test "Engine search with hybrid disabled ignores vector components" {
     try std.testing.expectEqual(@as(usize, 0), results.len);
 }
 
+test "pipeline_order has correct stage count" {
+    try std.testing.expectEqual(@as(usize, 9), pipeline_order.len);
+    try std.testing.expectEqual(RetrievalStage.query_expansion, pipeline_order[0]);
+    try std.testing.expectEqual(RetrievalStage.keyword, pipeline_order[1]);
+    try std.testing.expectEqual(RetrievalStage.vector, pipeline_order[2]);
+    try std.testing.expectEqual(RetrievalStage.merge_rrf, pipeline_order[3]);
+    try std.testing.expectEqual(RetrievalStage.min_relevance, pipeline_order[4]);
+    try std.testing.expectEqual(RetrievalStage.temporal_decay, pipeline_order[5]);
+    try std.testing.expectEqual(RetrievalStage.mmr, pipeline_order[6]);
+    try std.testing.expectEqual(RetrievalStage.llm_rerank, pipeline_order[7]);
+    try std.testing.expectEqual(RetrievalStage.limit, pipeline_order[8]);
+}
+
+test "Engine with temporal decay config" {
+    const allocator = std.testing.allocator;
+    var engine = RetrievalEngine.init(allocator, .{
+        .hybrid = .{
+            .temporal_decay = .{ .enabled = true, .half_life_days = 14 },
+        },
+    });
+    defer engine.deinit();
+
+    try std.testing.expect(engine.temporal_decay_cfg.enabled);
+    try std.testing.expectEqual(@as(u32, 14), engine.temporal_decay_cfg.half_life_days);
+}
+
+test "Engine with MMR config" {
+    const allocator = std.testing.allocator;
+    var engine = RetrievalEngine.init(allocator, .{
+        .hybrid = .{
+            .mmr = .{ .enabled = true, .lambda = 0.5 },
+        },
+    });
+    defer engine.deinit();
+
+    try std.testing.expect(engine.mmr_cfg.enabled);
+    try std.testing.expect(@abs(engine.mmr_cfg.lambda - 0.5) < 0.001);
+}
+
 test {
     _ = rrf;
     _ = vector_store_mod;
     _ = circuit_breaker_mod;
     _ = embeddings_mod;
+    _ = temporal_decay_mod;
+    _ = mmr_mod;
 }

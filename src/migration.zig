@@ -15,6 +15,16 @@ const migrate_mod = @import("memory/lifecycle/migrate.zig");
 
 const log = std.log.scoped(.migration);
 
+/// Policy for handling key conflicts during migration.
+pub const MergePolicy = enum {
+    /// Skip entries whose key already exists in the target (default safe mode).
+    skip_existing,
+    /// Overwrite target entry if the source content is different.
+    overwrite_newer,
+    /// Rename conflicting keys with a `_migrated_<hash>` suffix.
+    rename_conflicts,
+};
+
 /// Statistics collected during migration.
 pub const MigrationStats = struct {
     from_sqlite: usize = 0,
@@ -22,6 +32,8 @@ pub const MigrationStats = struct {
     imported: usize = 0,
     skipped_unchanged: usize = 0,
     renamed_conflicts: usize = 0,
+    overwritten: usize = 0,
+    backup_path: ?[]const u8 = null,
 };
 
 /// A single entry from the source workspace.
@@ -37,6 +49,17 @@ pub fn migrateOpenclaw(
     config: *const Config,
     source_path: ?[]const u8,
     dry_run: bool,
+) !MigrationStats {
+    return migrateOpenclawWithPolicy(allocator, config, source_path, dry_run, .rename_conflicts);
+}
+
+/// Run the OpenClaw migration command with an explicit merge policy.
+pub fn migrateOpenclawWithPolicy(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    source_path: ?[]const u8,
+    dry_run: bool,
+    policy: MergePolicy,
 ) !MigrationStats {
     const source = try resolveOpenclawWorkspace(allocator, source_path);
     defer allocator.free(source);
@@ -88,33 +111,60 @@ pub fn migrateOpenclaw(
         return stats;
     }
 
+    // Backup before import
+    const backup_path: ?[]u8 = createBackup(allocator, config) catch |err| blk: {
+        log.warn("backup before migration failed: {}", .{err});
+        break :blk null;
+    };
+    if (backup_path) |bp| {
+        stats.backup_path = bp;
+        log.info("created backup at {s}", .{bp});
+    }
+
     // Open the target memory backend
     var mem_rt = memory_root.initRuntime(allocator, &.{ .backend = config.memory_backend }, config.workspace_dir) orelse
         return error.TargetMemoryOpenFailed;
     defer mem_rt.deinit();
     var mem = mem_rt.memory;
 
-    // Import each entry into target memory, renaming conflicts
+    // Import each entry into target memory according to merge policy
     for (entries.items) |entry| {
-        // Check if key already exists in target
         var key = entry.key;
         var owned_key: ?[]u8 = null;
         defer if (owned_key) |k| allocator.free(k);
 
         if (mem.get(allocator, key) catch null) |existing| {
-            // Key conflict — check if content is the same
             defer {
                 var e = existing;
                 e.deinit(allocator);
             }
-            if (std.mem.eql(u8, existing.content, entry.content)) {
+
+            // Fast content comparison via hash
+            if (contentEqual(existing.content, entry.content)) {
                 stats.skipped_unchanged += 1;
                 continue;
             }
-            // Rename with _migrated suffix
-            owned_key = try std.fmt.allocPrint(allocator, "{s}_migrated", .{entry.key});
-            key = owned_key.?;
-            stats.renamed_conflicts += 1;
+
+            // Content differs — apply merge policy
+            switch (policy) {
+                .skip_existing => {
+                    stats.skipped_unchanged += 1;
+                    continue;
+                },
+                .overwrite_newer => {
+                    // Store will overwrite the existing entry
+                    stats.overwritten += 1;
+                },
+                .rename_conflicts => {
+                    const short_hash = contentShortHash(entry.content);
+                    owned_key = std.fmt.allocPrint(allocator, "{s}_migrated_{s}", .{ entry.key, short_hash }) catch {
+                        log.err("failed to allocate renamed key for '{s}'", .{entry.key});
+                        continue;
+                    };
+                    key = owned_key.?;
+                    stats.renamed_conflicts += 1;
+                },
+            }
         }
 
         const category = memory_root.MemoryCategory.fromString(entry.category);
@@ -126,6 +176,83 @@ pub fn migrateOpenclaw(
     }
 
     return stats;
+}
+
+// ── Content hashing ─────────────────────────────────────────────
+
+/// Compare two content strings using SHA-256 digest for fast equality check.
+/// For short strings (<=64 bytes), falls back to direct comparison to avoid
+/// hash overhead.
+fn contentEqual(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    if (a.len <= 64) return std.mem.eql(u8, a, b);
+    var ha: [32]u8 = undefined;
+    var hb: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(a, &ha, .{});
+    std.crypto.hash.sha2.Sha256.hash(b, &hb, .{});
+    return std.mem.eql(u8, &ha, &hb);
+}
+
+/// Produce a short hex hash (first 8 hex chars of SHA-256) for deterministic
+/// conflict key suffixes.
+pub fn contentShortHash(content: []const u8) [8]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest[0..4], .lower);
+    return hex;
+}
+
+// ── Backup ──────────────────────────────────────────────────────
+
+/// Create a backup of the target database before import.
+/// For SQLite backends, copies the .db file. For markdown, copies MEMORY.md.
+/// Returns the backup file path (caller owns the string).
+pub fn createBackup(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+) ![]u8 {
+    const timestamp = std.time.timestamp();
+    const backend = config.memory_backend;
+
+    if (std.mem.eql(u8, backend, "sqlite") or std.mem.eql(u8, backend, "lucid")) {
+        // SQLite-based backends: backup the memory.db file
+        const db_file = try std.fs.path.join(allocator, &.{ config.workspace_dir, "memory.db" });
+        defer allocator.free(db_file);
+        const backup_path = try std.fmt.allocPrint(allocator, "{s}.backup-{d}", .{ db_file, timestamp });
+        errdefer allocator.free(backup_path);
+        try copyFileAbsolute(db_file, backup_path);
+        return backup_path;
+    } else if (std.mem.eql(u8, backend, "markdown")) {
+        // Markdown backend: backup MEMORY.md
+        const md_file = try std.fs.path.join(allocator, &.{ config.workspace_dir, "MEMORY.md" });
+        defer allocator.free(md_file);
+        const backup_path = try std.fmt.allocPrint(allocator, "{s}.backup-{d}", .{ md_file, timestamp });
+        errdefer allocator.free(backup_path);
+        try copyFileAbsolute(md_file, backup_path);
+        return backup_path;
+    }
+
+    return error.UnsupportedBackend;
+}
+
+/// Restore from a backup file by copying it over the current target.
+/// The `backup_path` should be a path returned from `createBackup` or
+/// following the naming convention `<target>.backup-<timestamp>`.
+pub fn restoreBackup(backup_path: []const u8, target_path: []const u8) !void {
+    try copyFileAbsolute(backup_path, target_path);
+}
+
+fn copyFileAbsolute(src: []const u8, dst: []const u8) !void {
+    const src_file = try std.fs.openFileAbsolute(src, .{});
+    defer src_file.close();
+    const dst_file = try std.fs.createFileAbsolute(dst, .{});
+    defer dst_file.close();
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = src_file.read(&buf) catch return error.ReadError;
+        if (n == 0) break;
+        dst_file.writeAll(buf[0..n]) catch return error.WriteError;
+    }
 }
 
 /// Read OpenClaw markdown entries from MEMORY.md and daily logs.
@@ -305,6 +432,9 @@ pub const MigrateError = error{
     SelfMigration,
     NoHomeDir,
     TargetMemoryOpenFailed,
+    UnsupportedBackend,
+    ReadError,
+    WriteError,
 };
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -368,4 +498,130 @@ test "MigrationStats defaults to zero" {
     try std.testing.expectEqual(@as(usize, 0), stats.imported);
     try std.testing.expectEqual(@as(usize, 0), stats.from_sqlite);
     try std.testing.expectEqual(@as(usize, 0), stats.from_markdown);
+    try std.testing.expectEqual(@as(usize, 0), stats.overwritten);
+    try std.testing.expect(stats.backup_path == null);
+}
+
+// ── P5.2: Content hashing tests ──────────────────────────────────
+
+test "contentEqual: identical short strings" {
+    try std.testing.expect(contentEqual("hello", "hello"));
+}
+
+test "contentEqual: different short strings" {
+    try std.testing.expect(!contentEqual("hello", "world"));
+}
+
+test "contentEqual: different lengths" {
+    try std.testing.expect(!contentEqual("short", "a much longer string"));
+}
+
+test "contentEqual: identical long strings use hash path" {
+    const long = "x" ** 128;
+    try std.testing.expect(contentEqual(long, long));
+}
+
+test "contentEqual: different long strings" {
+    const a = "a" ** 128;
+    const b = "b" ** 128;
+    try std.testing.expect(!contentEqual(a, b));
+}
+
+test "contentShortHash: deterministic output" {
+    const h1 = contentShortHash("likes Zig");
+    const h2 = contentShortHash("likes Zig");
+    try std.testing.expectEqualStrings(&h1, &h2);
+}
+
+test "contentShortHash: different content yields different hash" {
+    const h1 = contentShortHash("likes Zig");
+    const h2 = contentShortHash("likes Rust");
+    try std.testing.expect(!std.mem.eql(u8, &h1, &h2));
+}
+
+test "contentShortHash: returns 8 hex chars" {
+    const hash = contentShortHash("test content");
+    try std.testing.expectEqual(@as(usize, 8), hash.len);
+    for (&hash) |ch| {
+        try std.testing.expect((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f'));
+    }
+}
+
+// ── P5.2: MergePolicy tests ─────────────────────────────────────
+
+test "MergePolicy enum values" {
+    // Verify all policy variants exist and are distinct
+    const skip = MergePolicy.skip_existing;
+    const overwrite = MergePolicy.overwrite_newer;
+    const rename = MergePolicy.rename_conflicts;
+    try std.testing.expect(skip != overwrite);
+    try std.testing.expect(overwrite != rename);
+    try std.testing.expect(skip != rename);
+}
+
+// ── P5.3: Backup tests ──────────────────────────────────────────
+
+test "backup and restore roundtrip" {
+    // Create a temp file to act as source
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    // Write a "database" file
+    const content = "SQLITE_MAGIC_test_data_12345";
+    const src_file = try tmp_dir.dir.createFile("test.db", .{});
+    try src_file.writeAll(content);
+    src_file.close();
+
+    // Get absolute paths via realpath
+    const src_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, "test.db");
+    defer std.testing.allocator.free(src_path);
+
+    const backup_name = "test.db.backup-1234";
+    const backup_file = try tmp_dir.dir.createFile(backup_name, .{});
+    backup_file.close();
+    const backup_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, backup_name);
+    defer std.testing.allocator.free(backup_path);
+
+    // Copy source to backup
+    try copyFileAbsolute(src_path, backup_path);
+
+    // Verify backup content matches
+    const backup_content = try tmp_dir.dir.readFileAlloc(std.testing.allocator, backup_name, 4096);
+    defer std.testing.allocator.free(backup_content);
+    try std.testing.expectEqualStrings(content, backup_content);
+
+    // Corrupt the "database" (simulate modification)
+    const mod_file = try tmp_dir.dir.createFile("test.db", .{});
+    try mod_file.writeAll("CORRUPTED");
+    mod_file.close();
+
+    // Restore from backup
+    try restoreBackup(backup_path, src_path);
+
+    // Verify restored content
+    const restored = try tmp_dir.dir.readFileAlloc(std.testing.allocator, "test.db", 4096);
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(content, restored);
+}
+
+test "copyFileAbsolute fails on non-existent source" {
+    const result = copyFileAbsolute("/tmp/nonexistent_migration_test_file_xyz.db", "/tmp/out.db");
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+// ── P5.1: Empty source yields zero entries ───────────────────────
+
+test "parseMarkdownFile with empty content returns zero" {
+    var entries: std.ArrayList(SourceEntry) = .empty;
+    defer entries.deinit(std.testing.allocator);
+    const count = try parseMarkdownFile(std.testing.allocator, "", "core", "empty", &entries);
+    try std.testing.expectEqual(@as(usize, 0), count);
+    try std.testing.expectEqual(@as(usize, 0), entries.items.len);
+}
+
+test "parseMarkdownFile with whitespace-only content returns zero" {
+    var entries: std.ArrayList(SourceEntry) = .empty;
+    defer entries.deinit(std.testing.allocator);
+    const count = try parseMarkdownFile(std.testing.allocator, "   \n  \n\t\n", "core", "ws", &entries);
+    try std.testing.expectEqual(@as(usize, 0), count);
 }

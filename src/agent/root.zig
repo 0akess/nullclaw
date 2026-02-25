@@ -214,6 +214,8 @@ pub const Agent = struct {
     mem: ?Memory,
     session_store: ?memory_mod.SessionStore = null,
     response_cache: ?*cache.ResponseCache = null,
+    /// Optional MemoryRuntime pointer for diagnostics (e.g. /doctor command).
+    mem_rt: ?*memory_mod.MemoryRuntime = null,
     /// Optional session scope for memory read/write operations.
     memory_session_id: ?[]const u8 = null,
     observer: Observer,

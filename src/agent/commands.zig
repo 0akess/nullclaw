@@ -4,6 +4,7 @@ const Tool = @import("../tools/root.zig").Tool;
 const skills_mod = @import("../skills.zig");
 const spawn_tool_mod = @import("../tools/spawn.zig");
 const subagent_mod = @import("../subagent.zig");
+const memory_mod = @import("../memory/root.zig");
 
 const SlashCommand = struct {
     name: []const u8,
@@ -1474,6 +1475,15 @@ pub fn composeFinalReply(
     return try out.toOwnedSlice(self.allocator);
 }
 
+fn handleDoctorCommand(self: anytype) ![]const u8 {
+    const rt: ?*memory_mod.MemoryRuntime = if (@hasField(@TypeOf(self.*), "mem_rt")) self.mem_rt else null;
+    if (rt) |mem_rt| {
+        const report = memory_mod.diagnostics.diagnose(mem_rt);
+        return memory_mod.diagnostics.formatReport(report, self.allocator);
+    }
+    return try self.allocator.dupe(u8, "Memory runtime not available. Diagnostics require a configured memory backend.");
+}
+
 pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
     const cmd = parseSlashCommand(message) orelse return null;
 
@@ -1512,6 +1522,7 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             \\  /config, /debug
             \\  /dock-telegram, /dock-discord, /dock-slack
             \\  /activation, /send, /elevated, /bash, /poll, /skill
+            \\  /doctor — memory subsystem diagnostics
             \\  exit, quit
         );
     }
@@ -1577,6 +1588,7 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
     if (isSlashName(cmd, "bash")) return try handleBashCommand(self, cmd.arg);
     if (isSlashName(cmd, "poll")) return try handlePollCommand(self);
     if (isSlashName(cmd, "skill")) return try handleSkillCommand(self, cmd.arg);
+    if (isSlashName(cmd, "doctor")) return try handleDoctorCommand(self);
 
     return null;
 }

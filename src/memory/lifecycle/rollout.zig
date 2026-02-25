@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const config_types = @import("../../config_types.zig");
+const log = std.log.scoped(.rollout);
 
 pub const RolloutMode = enum {
     off,
@@ -42,18 +43,24 @@ pub const RolloutPolicy = struct {
     }
 
     pub fn decide(self: RolloutPolicy, session_id: ?[]const u8) RolloutDecision {
-        return switch (self.mode) {
+        const decision: RolloutDecision = switch (self.mode) {
             .off => .keyword_only,
             .shadow => .shadow_hybrid,
             .on => .hybrid,
-            .canary => {
-                const sid = session_id orelse return .keyword_only;
-                if (sid.len == 0) return .keyword_only;
+            .canary => blk: {
+                const sid = session_id orelse break :blk .keyword_only;
+                if (sid.len == 0) break :blk .keyword_only;
                 const hash = std.hash.Fnv1a_32.hash(sid);
-                if (hash % 100 < self.canary_percent) return .hybrid;
-                return .keyword_only;
+                if (hash % 100 < self.canary_percent) break :blk .hybrid;
+                break :blk .keyword_only;
             },
         };
+        log.debug("rollout decide: mode={s} decision={s} session={s}", .{
+            @tagName(self.mode),
+            @tagName(decision),
+            session_id orelse "<none>",
+        });
+        return decision;
     }
 };
 

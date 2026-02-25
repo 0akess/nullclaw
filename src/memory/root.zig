@@ -16,35 +16,55 @@ const log = std.log.scoped(.memory);
 pub const sqlite = @import("engines/sqlite.zig");
 pub const markdown = @import("engines/markdown.zig");
 pub const none = @import("engines/none.zig");
+pub const memory_lru = @import("engines/memory_lru.zig");
 pub const lucid = @import("engines/lucid.zig");
 pub const postgres = if (build_options.enable_postgres) @import("engines/postgres.zig") else struct {};
+pub const redis = @import("engines/redis.zig");
+pub const lancedb = @import("engines/lancedb.zig");
 pub const registry = @import("engines/registry.zig");
 
 // retrieval/ (Layer B: Retrieval Engine)
 pub const retrieval = @import("retrieval/engine.zig");
 pub const retrieval_qmd = @import("retrieval/qmd.zig");
 pub const rrf = @import("retrieval/rrf.zig");
+pub const query_expansion = @import("retrieval/query_expansion.zig");
+pub const temporal_decay = @import("retrieval/temporal_decay.zig");
+pub const mmr = @import("retrieval/mmr.zig");
+pub const adaptive = @import("retrieval/adaptive.zig");
+pub const llm_reranker = @import("retrieval/llm_reranker.zig");
 
 // vector/ (Layer C: Vector Plane)
 pub const vector = @import("vector/math.zig");
 pub const vector_store = @import("vector/store.zig");
 pub const embeddings = @import("vector/embeddings.zig");
+pub const embeddings_gemini = @import("vector/embeddings_gemini.zig");
+pub const embeddings_voyage = @import("vector/embeddings_voyage.zig");
+pub const embeddings_ollama = @import("vector/embeddings_ollama.zig");
+pub const provider_router = @import("vector/provider_router.zig");
+pub const store_qdrant = @import("vector/store_qdrant.zig");
+pub const store_pgvector = @import("vector/store_pgvector.zig");
 pub const circuit_breaker = @import("vector/circuit_breaker.zig");
 pub const outbox = @import("vector/outbox.zig");
 pub const chunker = @import("vector/chunker.zig");
 
 // lifecycle/ (Layer D: Runtime Orchestrator)
 pub const cache = @import("lifecycle/cache.zig");
+pub const semantic_cache = @import("lifecycle/semantic_cache.zig");
 pub const hygiene = @import("lifecycle/hygiene.zig");
 pub const snapshot = @import("lifecycle/snapshot.zig");
 pub const rollout = @import("lifecycle/rollout.zig");
 pub const migrate = @import("lifecycle/migrate.zig");
+pub const diagnostics = @import("lifecycle/diagnostics.zig");
+pub const summarizer = @import("lifecycle/summarizer.zig");
 
 pub const SqliteMemory = sqlite.SqliteMemory;
 pub const MarkdownMemory = markdown.MarkdownMemory;
 pub const NoneMemory = none.NoneMemory;
+pub const InMemoryLruMemory = memory_lru.InMemoryLruMemory;
 pub const LucidMemory = lucid.LucidMemory;
 pub const PostgresMemory = if (build_options.enable_postgres) postgres.PostgresMemory else struct {};
+pub const RedisMemory = redis.RedisMemory;
+pub const LanceDbMemory = lancedb.LanceDbMemory;
 pub const ResponseCache = cache.ResponseCache;
 pub const Chunk = chunker.Chunk;
 pub const chunkMarkdown = chunker.chunkMarkdown;
@@ -68,9 +88,12 @@ pub const PrimaryAdapter = retrieval.PrimaryAdapter;
 pub const RetrievalEngine = retrieval.RetrievalEngine;
 pub const QmdAdapter = retrieval_qmd.QmdAdapter;
 pub const rrfMerge = rrf.rrfMerge;
+pub const applyTemporalDecay = temporal_decay.applyTemporalDecay;
 pub const VectorStore = vector_store.VectorStore;
 pub const VectorResult = vector_store.VectorResult;
+pub const HealthStatus = vector_store.HealthStatus;
 pub const SqliteSharedVectorStore = vector_store.SqliteSharedVectorStore;
+pub const QdrantVectorStore = store_qdrant.QdrantVectorStore;
 pub const freeVectorResults = vector_store.freeVectorResults;
 pub const VectorOutbox = outbox.VectorOutbox;
 pub const CircuitBreaker = circuit_breaker.CircuitBreaker;
@@ -80,6 +103,31 @@ pub const RolloutDecision = rollout.RolloutDecision;
 pub const SqliteSourceEntry = migrate.SqliteSourceEntry;
 pub const readBrainDb = migrate.readBrainDb;
 pub const freeSqliteEntries = migrate.freeSqliteEntries;
+pub const DiagnosticReport = diagnostics.DiagnosticReport;
+pub const CacheStats = diagnostics.CacheStats;
+pub const diagnoseRuntime = diagnostics.diagnose;
+pub const formatDiagnosticReport = diagnostics.formatReport;
+
+// Extended retrieval stages
+pub const expandQuery = query_expansion.expandQuery;
+pub const ExpandedQuery = query_expansion.ExpandedQuery;
+pub const analyzeQuery = adaptive.analyzeQuery;
+pub const AdaptiveConfig = adaptive.AdaptiveConfig;
+pub const QueryAnalysis = adaptive.QueryAnalysis;
+pub const RetrievalStrategy = adaptive.RetrievalStrategy;
+pub const buildRerankPrompt = llm_reranker.buildRerankPrompt;
+pub const parseRerankResponse = llm_reranker.parseRerankResponse;
+pub const LlmRerankerConfig = llm_reranker.LlmRerankerConfig;
+
+// Lifecycle: summarizer
+pub const SummarizerConfig = summarizer.SummarizerConfig;
+pub const SummaryResult = summarizer.SummaryResult;
+pub const shouldSummarize = summarizer.shouldSummarize;
+pub const buildSummarizationPrompt = summarizer.buildSummarizationPrompt;
+pub const parseSummaryResponse = summarizer.parseSummaryResponse;
+
+// Lifecycle: semantic cache
+pub const SemanticCache = semantic_cache.SemanticCache;
 
 // ── Session message types ─────────────────────────────────────────
 
@@ -266,8 +314,11 @@ pub const MemoryBackendKind = enum {
     sqlite_backend,
     markdown_backend,
     none_backend,
+    memory_lru_backend,
     lucid_backend,
     postgres_backend,
+    redis_backend,
+    lancedb_backend,
     unknown,
 };
 
@@ -283,8 +334,11 @@ pub fn classifyBackend(backend_name: []const u8) MemoryBackendKind {
     if (std.mem.eql(u8, backend_name, "sqlite")) return .sqlite_backend;
     if (std.mem.eql(u8, backend_name, "markdown")) return .markdown_backend;
     if (std.mem.eql(u8, backend_name, "none")) return .none_backend;
+    if (std.mem.eql(u8, backend_name, "memory")) return .memory_lru_backend;
     if (std.mem.eql(u8, backend_name, "lucid")) return .lucid_backend;
     if (std.mem.eql(u8, backend_name, "postgres")) return .postgres_backend;
+    if (std.mem.eql(u8, backend_name, "redis")) return .redis_backend;
+    if (std.mem.eql(u8, backend_name, "lancedb")) return .lancedb_backend;
     return .unknown;
 }
 
@@ -312,6 +366,20 @@ const base_selectable = [_]MemoryBackendProfile{
         .label = "Lucid — SQLite + cross-project memory sync via lucid CLI",
         .auto_save_default = true,
         .uses_sqlite_hygiene = true,
+        .sqlite_based = true,
+    },
+    .{
+        .key = "redis",
+        .label = "Redis — distributed in-memory store with optional TTL",
+        .auto_save_default = true,
+        .uses_sqlite_hygiene = false,
+        .sqlite_based = false,
+    },
+    .{
+        .key = "lancedb",
+        .label = "LanceDB — vector-augmented SQLite with duplicate detection",
+        .auto_save_default = true,
+        .uses_sqlite_hygiene = false,
         .sqlite_based = true,
     },
     .{
@@ -378,7 +446,21 @@ pub fn createMemory(allocator: std.mem.Allocator, backend_name: []const u8, path
             impl_.allocator = allocator;
             return impl_.memory();
         },
+        .memory_lru_backend => {
+            const impl_ = try allocator.create(InMemoryLruMemory);
+            impl_.* = InMemoryLruMemory.init(allocator, 1000);
+            impl_.owns_self = true;
+            return impl_.memory();
+        },
+        .lancedb_backend => {
+            const impl_ = try allocator.create(LanceDbMemory);
+            errdefer allocator.destroy(impl_);
+            impl_.* = try LanceDbMemory.init(allocator, path, null, .{});
+            impl_.owns_self = true;
+            return impl_.memory();
+        },
         .postgres_backend => return error.InvalidBackend, // postgres requires initRuntime with config
+        .redis_backend => return error.InvalidBackend, // redis requires initRuntime with config
         .unknown => return error.InvalidBackend,
     };
 }
@@ -399,6 +481,12 @@ pub const MemoryRuntime = struct {
 
     // P5: rollout policy
     _rollout_policy: rollout.RolloutPolicy = .{ .mode = .on, .canary_percent = 0, .shadow_percent = 0 },
+
+    // Lifecycle: summarizer config
+    _summarizer_cfg: summarizer.SummarizerConfig = .{},
+
+    // Lifecycle: semantic cache (optional, extends response cache with cosine similarity)
+    _semantic_cache: ?*semantic_cache.SemanticCache = null,
 
     // P3: vector plane components (all optional)
     _embedding_provider: ?embeddings.EmbeddingProvider = null,
@@ -498,6 +586,21 @@ pub const MemoryRuntime = struct {
         };
     }
 
+    /// Get the summarizer configuration (for the agent/session layer to use).
+    pub fn summarizerConfig(self: *const MemoryRuntime) summarizer.SummarizerConfig {
+        return self._summarizer_cfg;
+    }
+
+    /// Get the semantic cache (for the agent/session layer to use).
+    pub fn semanticCache(self: *MemoryRuntime) ?*semantic_cache.SemanticCache {
+        return self._semantic_cache;
+    }
+
+    /// Run memory doctor diagnostics and return a report.
+    pub fn diagnose(self: *MemoryRuntime) diagnostics.DiagnosticReport {
+        return diagnostics.diagnose(self);
+    }
+
     pub fn deinit(self: *MemoryRuntime) void {
         // P3 cleanup (before engine, since engine may reference vector store)
         if (self._outbox) |ob| {
@@ -518,6 +621,10 @@ pub const MemoryRuntime = struct {
         if (self._engine) |engine| {
             engine.deinit();
             self._allocator.destroy(engine);
+        }
+        if (self._semantic_cache) |sc| {
+            sc.deinit();
+            self._allocator.destroy(sc);
         }
         if (self.response_cache) |rc| {
             rc.deinit();
@@ -628,6 +735,9 @@ pub fn initRuntime(
             };
         }
 
+        // Configure extended pipeline stages (query expansion, adaptive, LLM reranker)
+        eng.setRetrievalStages(config.retrieval_stages);
+
         engine = eng;
     }
 
@@ -687,6 +797,53 @@ pub fn initRuntime(
     // Free postgres_url after backend creation (backend dupes what it needs)
     if (cfg.postgres_url) |pu| allocator.free(std.mem.span(pu));
 
+    // ── Lifecycle: semantic cache ──
+    var sem_cache: ?*semantic_cache.SemanticCache = null;
+    if (config.response_cache.enabled and embed_provider != null) sem_cache_blk: {
+        const sc_path = std.fs.path.joinZ(allocator, &.{ workspace_dir, "semantic_cache.db" }) catch break :sem_cache_blk;
+        const sc = allocator.create(semantic_cache.SemanticCache) catch {
+            allocator.free(std.mem.span(sc_path.ptr));
+            break :sem_cache_blk;
+        };
+        sc.* = semantic_cache.SemanticCache.init(
+            sc_path.ptr,
+            config.response_cache.ttl_minutes,
+            config.response_cache.max_entries,
+            0.95, // cosine similarity threshold
+            embed_provider,
+        ) catch {
+            allocator.destroy(sc);
+            allocator.free(std.mem.span(sc_path.ptr));
+            break :sem_cache_blk;
+        };
+        sem_cache = sc;
+        // Note: sc_path is owned by the semantic cache's sqlite connection
+    }
+
+    // ── Lifecycle: summarizer config ──
+    const summarizer_cfg = summarizer.SummarizerConfig{
+        .enabled = config.summarizer.enabled,
+        .window_size_tokens = @intCast(config.summarizer.window_size_tokens),
+        .summary_max_tokens = @intCast(config.summarizer.summary_max_tokens),
+        .auto_extract_semantic = config.summarizer.auto_extract_semantic,
+    };
+
+    // ── Startup diagnostic ──
+    const source_count: usize = if (engine) |eng| eng.sources.items.len else 0;
+    const vector_mode: []const u8 = if (vs_impl != null) "sqlite_shared" else "none";
+    log.info("memory plan resolved: backend={s} retrieval={s} vector={s} rollout={s} hygiene={} snapshot={} cache={} semantic_cache={} summarizer={} sources={d}", .{
+        config.backend,
+        if (config.search.query.hybrid.enabled) "hybrid" else "keyword",
+        vector_mode,
+        config.reliability.rollout_mode,
+        config.lifecycle.hygiene_enabled,
+        config.lifecycle.snapshot_enabled,
+        config.response_cache.enabled,
+        sem_cache != null,
+        config.summarizer.enabled,
+        source_count,
+    });
+
     return .{
         .memory = instance.memory,
         .session_store = instance.session_store,
@@ -697,6 +854,8 @@ pub fn initRuntime(
         ._engine = engine,
         ._allocator = allocator,
         ._rollout_policy = rollout.RolloutPolicy.init(config.reliability),
+        ._summarizer_cfg = summarizer_cfg,
+        ._semantic_cache = sem_cache,
         ._embedding_provider = embed_provider,
         ._vector_store_impl = vs_impl,
         ._circuit_breaker = cb_inst,
@@ -769,16 +928,19 @@ test "classifyBackend" {
     try std.testing.expect(classifyBackend("none") == .none_backend);
     try std.testing.expect(classifyBackend("lucid") == .lucid_backend);
     try std.testing.expect(classifyBackend("postgres") == .postgres_backend);
-    try std.testing.expect(classifyBackend("redis") == .unknown);
+    try std.testing.expect(classifyBackend("redis") == .redis_backend);
+    try std.testing.expect(classifyBackend("lancedb") == .lancedb_backend);
 }
 
 test "selectable backends are ordered" {
-    const expected: usize = if (build_options.enable_postgres) 5 else 4;
+    const expected: usize = if (build_options.enable_postgres) 7 else 6;
     try std.testing.expect(selectable_backends.len == expected);
     try std.testing.expectEqualStrings("sqlite", selectable_backends[0].key);
     try std.testing.expectEqualStrings("markdown", selectable_backends[1].key);
     try std.testing.expectEqualStrings("lucid", selectable_backends[2].key);
-    try std.testing.expectEqualStrings("none", selectable_backends[3].key);
+    try std.testing.expectEqualStrings("redis", selectable_backends[3].key);
+    try std.testing.expectEqualStrings("lancedb", selectable_backends[4].key);
+    try std.testing.expectEqualStrings("none", selectable_backends[5].key);
 }
 
 test "defaultBackendKey is sqlite" {
@@ -805,12 +967,17 @@ test "MemoryCategory eql different tags" {
 }
 
 test "classifyBackend unknown returns unknown" {
-    try std.testing.expect(classifyBackend("redis") == .unknown);
+    try std.testing.expect(classifyBackend("nonexistent") == .unknown);
     try std.testing.expect(classifyBackend("") == .unknown);
     try std.testing.expect(classifyBackend("SQLITE") == .unknown);
 }
 
 test "createMemory unknown backend returns InvalidBackend" {
+    const result = createMemory(std.testing.allocator, "nonexistent", "unused");
+    try std.testing.expectError(error.InvalidBackend, result);
+}
+
+test "createMemory redis backend returns InvalidBackend" {
     const result = createMemory(std.testing.allocator, "redis", "unused");
     try std.testing.expectError(error.InvalidBackend, result);
 }
@@ -827,10 +994,22 @@ test "selectable backends lucid is sqlite based" {
     try std.testing.expect(selectable_backends[2].uses_sqlite_hygiene);
 }
 
-test "selectable backends none has no auto save" {
-    try std.testing.expect(!selectable_backends[3].auto_save_default);
+test "selectable backends redis is not sqlite based" {
+    try std.testing.expect(selectable_backends[3].auto_save_default);
     try std.testing.expect(!selectable_backends[3].sqlite_based);
     try std.testing.expect(!selectable_backends[3].uses_sqlite_hygiene);
+}
+
+test "selectable backends lancedb is sqlite based" {
+    try std.testing.expect(selectable_backends[4].auto_save_default);
+    try std.testing.expect(selectable_backends[4].sqlite_based);
+    try std.testing.expect(!selectable_backends[4].uses_sqlite_hygiene);
+}
+
+test "selectable backends none has no auto save" {
+    try std.testing.expect(!selectable_backends[5].auto_save_default);
+    try std.testing.expect(!selectable_backends[5].sqlite_based);
+    try std.testing.expect(!selectable_backends[5].uses_sqlite_hygiene);
 }
 
 test "Memory convenience store accepts session_id" {
@@ -1116,24 +1295,49 @@ test "MemoryRuntime.deinit cleans up P3 resources" {
 }
 
 test {
+    // engines/ (Layer A)
     _ = sqlite;
     _ = markdown;
     _ = none;
+    _ = memory_lru;
     _ = lucid;
     _ = postgres;
-    _ = cache;
-    _ = chunker;
-    _ = embeddings;
-    _ = vector;
-    _ = hygiene;
-    _ = snapshot;
+    _ = redis;
+    _ = lancedb;
     _ = registry;
-    _ = rrf;
+    _ = @import("engines/contract_test.zig");
+
+    // retrieval/ (Layer B)
     _ = retrieval;
     _ = retrieval_qmd;
+    _ = rrf;
+    _ = query_expansion;
+    _ = temporal_decay;
+    _ = mmr;
+    _ = adaptive;
+    _ = llm_reranker;
+
+    // vector/ (Layer C)
+    _ = vector;
     _ = vector_store;
-    _ = outbox;
+    _ = embeddings;
+    _ = embeddings_gemini;
+    _ = embeddings_voyage;
+    _ = embeddings_ollama;
+    _ = provider_router;
+    _ = store_qdrant;
+    _ = store_pgvector;
     _ = circuit_breaker;
+    _ = outbox;
+    _ = chunker;
+
+    // lifecycle/ (Layer D)
+    _ = cache;
+    _ = semantic_cache;
+    _ = hygiene;
+    _ = snapshot;
     _ = rollout;
     _ = migrate;
+    _ = diagnostics;
+    _ = summarizer;
 }

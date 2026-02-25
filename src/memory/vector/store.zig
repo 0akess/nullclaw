@@ -11,6 +11,19 @@ const sqlite_mod = @import("../engines/sqlite.zig");
 const c = sqlite_mod.c;
 const SQLITE_STATIC = sqlite_mod.SQLITE_STATIC;
 
+// ── Health status ─────────────────────────────────────────────────
+
+pub const HealthStatus = struct {
+    ok: bool,
+    latency_ns: u64,
+    entry_count: ?usize,
+    error_msg: ?[]const u8,
+
+    pub fn deinit(self: *const HealthStatus, allocator: Allocator) void {
+        if (self.error_msg) |msg| allocator.free(msg);
+    }
+};
+
 // ── Result types ──────────────────────────────────────────────────
 
 pub const VectorResult = struct {
@@ -38,6 +51,7 @@ pub const VectorStore = struct {
         search: *const fn (ptr: *anyopaque, alloc: Allocator, query_embedding: []const f32, limit: u32) anyerror![]VectorResult,
         delete: *const fn (ptr: *anyopaque, key: []const u8) anyerror!void,
         count: *const fn (ptr: *anyopaque) anyerror!usize,
+        health_check: *const fn (ptr: *anyopaque, alloc: Allocator) anyerror!HealthStatus,
         deinit: *const fn (ptr: *anyopaque) void,
     };
 
@@ -55,6 +69,10 @@ pub const VectorStore = struct {
 
     pub fn count(self: VectorStore) !usize {
         return self.vtable.count(self.ptr);
+    }
+
+    pub fn healthCheck(self: VectorStore, alloc: Allocator) !HealthStatus {
+        return self.vtable.health_check(self.ptr, alloc);
     }
 
     pub fn deinitStore(self: VectorStore) void {
@@ -206,6 +224,45 @@ pub const SqliteSharedVectorStore = struct {
         return 0;
     }
 
+    fn implHealthCheck(ptr: *anyopaque, alloc: Allocator) anyerror!HealthStatus {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const start = std.time.nanoTimestamp();
+
+        const sql = "SELECT COUNT(*) FROM memory_embeddings";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) {
+            const elapsed: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+            return HealthStatus{
+                .ok = false,
+                .latency_ns = elapsed,
+                .entry_count = null,
+                .error_msg = try alloc.dupe(u8, "sqlite prepare failed"),
+            };
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        rc = c.sqlite3_step(stmt);
+        const elapsed: u64 = @intCast(@max(0, std.time.nanoTimestamp() - start));
+
+        if (rc == c.SQLITE_ROW) {
+            const n: usize = @intCast(c.sqlite3_column_int64(stmt, 0));
+            return HealthStatus{
+                .ok = true,
+                .latency_ns = elapsed,
+                .entry_count = n,
+                .error_msg = null,
+            };
+        }
+
+        return HealthStatus{
+            .ok = false,
+            .latency_ns = elapsed,
+            .entry_count = null,
+            .error_msg = try alloc.dupe(u8, "sqlite step failed"),
+        };
+    }
+
     fn implDeinit(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.deinit();
@@ -216,6 +273,7 @@ pub const SqliteSharedVectorStore = struct {
         .search = &implSearch,
         .delete = &implDelete,
         .count = &implCount,
+        .health_check = &implHealthCheck,
         .deinit = &implDeinit,
     };
 };
@@ -483,4 +541,65 @@ test "empty embedding handled gracefully" {
     defer freeVectorResults(std.testing.allocator, results);
     // The empty embedding row has 0-length blob, bytesToVec returns empty, cosine returns 0
     // Result is still returned (score = 0)
+}
+
+test "healthCheck returns ok with entry count" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+
+    // Insert some data
+    try s.upsert("hc_key1", &[_]f32{ 1.0, 0.0 });
+    try s.upsert("hc_key2", &[_]f32{ 0.0, 1.0 });
+
+    const status = try s.healthCheck(std.testing.allocator);
+    defer status.deinit(std.testing.allocator);
+
+    try std.testing.expect(status.ok);
+    try std.testing.expect(status.latency_ns > 0);
+    try std.testing.expectEqual(@as(?usize, 2), status.entry_count);
+    try std.testing.expectEqual(@as(?[]const u8, null), status.error_msg);
+}
+
+test "healthCheck on empty store returns ok with zero count" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const status = try s.healthCheck(std.testing.allocator);
+    defer status.deinit(std.testing.allocator);
+
+    try std.testing.expect(status.ok);
+    try std.testing.expectEqual(@as(?usize, 0), status.entry_count);
+    try std.testing.expectEqual(@as(?[]const u8, null), status.error_msg);
+}
+
+test "HealthStatus deinit frees error_msg" {
+    const allocator = std.testing.allocator;
+    const msg = try allocator.dupe(u8, "test error");
+    const status = HealthStatus{
+        .ok = false,
+        .latency_ns = 100,
+        .entry_count = null,
+        .error_msg = msg,
+    };
+    status.deinit(allocator);
+    // No leak = pass (testing allocator detects leaks)
+}
+
+test "HealthStatus deinit with null error_msg is safe" {
+    const status = HealthStatus{
+        .ok = true,
+        .latency_ns = 50,
+        .entry_count = 42,
+        .error_msg = null,
+    };
+    status.deinit(std.testing.allocator);
 }

@@ -53,6 +53,7 @@ pub const SessionManager = struct {
     mem: ?Memory,
     session_store: ?memory_mod.SessionStore = null,
     response_cache: ?*memory_mod.cache.ResponseCache = null,
+    mem_rt: ?*memory_mod.MemoryRuntime = null,
     observer: Observer,
     policy: ?*const SecurityPolicy = null,
 
@@ -122,6 +123,7 @@ pub const SessionManager = struct {
         agent.policy = self.policy;
         agent.session_store = self.session_store;
         agent.response_cache = self.response_cache;
+        agent.mem_rt = self.mem_rt;
         agent.memory_session_id = owned_key;
 
         session.* = .{

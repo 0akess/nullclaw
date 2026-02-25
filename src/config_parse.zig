@@ -747,6 +747,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     // Memory
     if (root.get("memory")) |mem| {
         if (mem == .object) {
+            if (mem.object.get("profile")) |v| {
+                if (v == .string) self.memory.profile = try self.allocator.dupe(u8, v.string);
+            }
             if (mem.object.get("backend")) |v| {
                 if (v == .string) self.memory.backend = try self.allocator.dupe(u8, v.string);
             }
@@ -792,6 +795,12 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             };
                             if (store.get("qdrant_collection")) |v| if (v == .string) {
                                 self.memory.search.store.qdrant_collection = try self.allocator.dupe(u8, v.string);
+                            };
+                            if (store.get("qdrant_api_key")) |v| if (v == .string) {
+                                self.memory.search.store.qdrant_api_key = try self.allocator.dupe(u8, v.string);
+                            };
+                            if (store.get("pgvector_table")) |v| if (v == .string) {
+                                self.memory.search.store.pgvector_table = try self.allocator.dupe(u8, v.string);
                             };
                         }
                     }
@@ -1118,6 +1127,78 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     };
                     if (pg.get("connect_timeout_secs")) |v| if (v == .integer) {
                         self.memory.postgres.connect_timeout_secs = @intCast(v.integer);
+                    };
+                }
+            }
+
+            // redis
+            if (mem.object.get("redis")) |redis_val| {
+                if (redis_val == .object) {
+                    const rd = redis_val.object;
+                    if (rd.get("host")) |v| if (v == .string) {
+                        self.memory.redis.host = try self.allocator.dupe(u8, v.string);
+                    };
+                    if (rd.get("port")) |v| if (v == .integer) {
+                        self.memory.redis.port = @intCast(v.integer);
+                    };
+                    if (rd.get("password")) |v| if (v == .string) {
+                        self.memory.redis.password = try self.allocator.dupe(u8, v.string);
+                    };
+                    if (rd.get("db_index")) |v| if (v == .integer) {
+                        self.memory.redis.db_index = @intCast(v.integer);
+                    };
+                    if (rd.get("key_prefix")) |v| if (v == .string) {
+                        self.memory.redis.key_prefix = try self.allocator.dupe(u8, v.string);
+                    };
+                    if (rd.get("ttl_seconds")) |v| if (v == .integer) {
+                        self.memory.redis.ttl_seconds = @intCast(v.integer);
+                    };
+                }
+            }
+
+            // retrieval_stages
+            if (mem.object.get("retrieval_stages")) |rs_val| {
+                if (rs_val == .object) {
+                    const rs = rs_val.object;
+                    if (rs.get("query_expansion_enabled")) |v| if (v == .bool) {
+                        self.memory.retrieval_stages.query_expansion_enabled = v.bool;
+                    };
+                    if (rs.get("adaptive_retrieval_enabled")) |v| if (v == .bool) {
+                        self.memory.retrieval_stages.adaptive_retrieval_enabled = v.bool;
+                    };
+                    if (rs.get("adaptive_keyword_max_tokens")) |v| if (v == .integer) {
+                        self.memory.retrieval_stages.adaptive_keyword_max_tokens = @intCast(v.integer);
+                    };
+                    if (rs.get("adaptive_vector_min_tokens")) |v| if (v == .integer) {
+                        self.memory.retrieval_stages.adaptive_vector_min_tokens = @intCast(v.integer);
+                    };
+                    if (rs.get("llm_reranker_enabled")) |v| if (v == .bool) {
+                        self.memory.retrieval_stages.llm_reranker_enabled = v.bool;
+                    };
+                    if (rs.get("llm_reranker_max_candidates")) |v| if (v == .integer) {
+                        self.memory.retrieval_stages.llm_reranker_max_candidates = @intCast(v.integer);
+                    };
+                    if (rs.get("llm_reranker_timeout_ms")) |v| if (v == .integer) {
+                        self.memory.retrieval_stages.llm_reranker_timeout_ms = @intCast(v.integer);
+                    };
+                }
+            }
+
+            // summarizer
+            if (mem.object.get("summarizer")) |sum_val| {
+                if (sum_val == .object) {
+                    const sum = sum_val.object;
+                    if (sum.get("enabled")) |v| if (v == .bool) {
+                        self.memory.summarizer.enabled = v.bool;
+                    };
+                    if (sum.get("window_size_tokens")) |v| if (v == .integer) {
+                        self.memory.summarizer.window_size_tokens = @intCast(v.integer);
+                    };
+                    if (sum.get("summary_max_tokens")) |v| if (v == .integer) {
+                        self.memory.summarizer.summary_max_tokens = @intCast(v.integer);
+                    };
+                    if (sum.get("auto_extract_semantic")) |v| if (v == .bool) {
+                        self.memory.summarizer.auto_extract_semantic = v.bool;
                     };
                 }
             }

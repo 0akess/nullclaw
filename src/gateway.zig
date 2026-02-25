@@ -2059,7 +2059,11 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
             }) catch &.{};
 
             const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
-            session_mgr_opt = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, noop_obs_gateway.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
+            var sm = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, noop_obs_gateway.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
+            if (mem_rt) |*rt| {
+                sm.mem_rt = rt;
+            }
+            session_mgr_opt = sm;
         }
     }
     if (state.pairing_guard == null) {

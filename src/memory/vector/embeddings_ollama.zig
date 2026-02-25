@@ -1,0 +1,297 @@
+//! Ollama local embedding provider — nomic-embed-text via /api/embed endpoint.
+//!
+//! API: POST http://localhost:11434/api/embed
+//! Auth: none (local service)
+//! Default model: "nomic-embed-text", 768 dimensions (model-dependent)
+
+const std = @import("std");
+const EmbeddingProvider = @import("embeddings.zig").EmbeddingProvider;
+
+pub const OllamaEmbedding = struct {
+    allocator: std.mem.Allocator,
+    base_url: []const u8,
+    model: []const u8,
+    dims: u32,
+
+    const Self = @This();
+
+    pub const default_base_url = "http://localhost:11434";
+    pub const default_model = "nomic-embed-text";
+    pub const default_dims: u32 = 768;
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        model: ?[]const u8,
+        base_url: ?[]const u8,
+        dims: ?u32,
+    ) !*Self {
+        const self_ = try allocator.create(Self);
+        self_.* = .{
+            .allocator = allocator,
+            .base_url = try allocator.dupe(u8, base_url orelse default_base_url),
+            .model = try allocator.dupe(u8, model orelse default_model),
+            .dims = dims orelse default_dims,
+        };
+        return self_;
+    }
+
+    pub fn deinitSelf(self: *Self) void {
+        self.allocator.free(self.base_url);
+        self.allocator.free(self.model);
+        self.allocator.destroy(self);
+    }
+
+    fn buildUrl(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/api/embed", .{self.base_url});
+    }
+
+    /// Build request body JSON: {"model":"...","input":"..."}
+    pub fn buildRequestBody(allocator: std.mem.Allocator, model: []const u8, text: []const u8) ![]u8 {
+        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer body_buf.deinit(allocator);
+
+        try body_buf.appendSlice(allocator, "{\"model\":\"");
+        try appendJsonEscaped(&body_buf, allocator, model);
+        try body_buf.appendSlice(allocator, "\",\"input\":\"");
+        try appendJsonEscaped(&body_buf, allocator, text);
+        try body_buf.appendSlice(allocator, "\"}");
+
+        return allocator.dupe(u8, body_buf.items);
+    }
+
+    fn implName(_: *anyopaque) []const u8 {
+        return "ollama";
+    }
+
+    fn implDimensions(ptr: *anyopaque) u32 {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.dims;
+    }
+
+    fn implEmbed(ptr: *anyopaque, allocator: std.mem.Allocator, text: []const u8) anyerror![]f32 {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+
+        if (text.len == 0) {
+            return allocator.alloc(f32, 0);
+        }
+
+        const body = try buildRequestBody(allocator, self_.model, text);
+        defer allocator.free(body);
+
+        const url = try self_.buildUrl(allocator);
+        defer allocator.free(url);
+
+        var client = std.http.Client{ .allocator = allocator };
+        defer client.deinit();
+
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url },
+            .method = .POST,
+            .payload = body,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+            },
+            .response_writer = &aw.writer,
+        }) catch return error.EmbeddingApiError;
+
+        if (result.status != .ok) {
+            return error.EmbeddingApiError;
+        }
+
+        const resp_body = aw.writer.buffer[0..aw.writer.end];
+        if (resp_body.len == 0) return error.EmbeddingApiError;
+
+        return parseOllamaResponse(allocator, resp_body);
+    }
+
+    fn implDeinit(ptr: *anyopaque) void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        self_.deinitSelf();
+    }
+
+    const vtable = EmbeddingProvider.VTable{
+        .name = &implName,
+        .dimensions = &implDimensions,
+        .embed = &implEmbed,
+        .deinit = &implDeinit,
+    };
+
+    pub fn provider(self: *Self) EmbeddingProvider {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &vtable,
+        };
+    }
+};
+
+/// Parse Ollama response: {"embeddings":[[0.1, 0.2, ...]]}
+pub fn parseOllamaResponse(allocator: std.mem.Allocator, json_bytes: []const u8) ![]f32 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return error.InvalidEmbeddingResponse;
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const embeddings = root.object.get("embeddings") orelse return error.InvalidEmbeddingResponse;
+    const outer_array = switch (embeddings) {
+        .array => |a| a,
+        else => return error.InvalidEmbeddingResponse,
+    };
+    if (outer_array.items.len == 0) return error.InvalidEmbeddingResponse;
+
+    const inner = outer_array.items[0];
+    const emb_array = switch (inner) {
+        .array => |a| a,
+        else => return error.InvalidEmbeddingResponse,
+    };
+
+    const result = try allocator.alloc(f32, emb_array.items.len);
+    for (emb_array.items, 0..) |val, i| {
+        result[i] = switch (val) {
+            .float => |f| @floatCast(f),
+            .integer => |n| @floatFromInt(n),
+            else => 0.0,
+        };
+    }
+    return result;
+}
+
+fn appendJsonEscaped(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
+    for (text) |ch| {
+        switch (ch) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            else => {
+                if (ch < 0x20) {
+                    var hex_buf: [6]u8 = undefined;
+                    const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{ch}) catch continue;
+                    try buf.appendSlice(allocator, hex);
+                } else {
+                    try buf.append(allocator, ch);
+                }
+            },
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+test "OllamaEmbedding init and deinit" {
+    var impl_ = try OllamaEmbedding.init(
+        std.testing.allocator,
+        null,
+        null,
+        null,
+    );
+    const p = impl_.provider();
+    try std.testing.expectEqualStrings("ollama", p.getName());
+    try std.testing.expectEqual(@as(u32, 768), p.getDimensions());
+    p.deinit();
+}
+
+test "OllamaEmbedding init with custom values" {
+    var impl_ = try OllamaEmbedding.init(
+        std.testing.allocator,
+        "mxbai-embed-large",
+        "http://gpu-server:11434",
+        1024,
+    );
+    const p = impl_.provider();
+    try std.testing.expectEqualStrings("ollama", p.getName());
+    try std.testing.expectEqual(@as(u32, 1024), p.getDimensions());
+    p.deinit();
+}
+
+test "OllamaEmbedding embed empty text" {
+    var impl_ = try OllamaEmbedding.init(
+        std.testing.allocator,
+        null,
+        null,
+        null,
+    );
+    const p = impl_.provider();
+    defer p.deinit();
+
+    const vec = try p.embed(std.testing.allocator, "");
+    defer std.testing.allocator.free(vec);
+    try std.testing.expectEqual(@as(usize, 0), vec.len);
+}
+
+test "OllamaEmbedding buildRequestBody" {
+    const body = try OllamaEmbedding.buildRequestBody(std.testing.allocator, "nomic-embed-text", "hello world");
+    defer std.testing.allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const model_val = root.object.get("model") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("nomic-embed-text", model_val.string);
+
+    const input = root.object.get("input") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("hello world", input.string);
+}
+
+test "OllamaEmbedding buildRequestBody escapes special chars" {
+    const body = try OllamaEmbedding.buildRequestBody(std.testing.allocator, "model", "hello \"world\"\nnewline");
+    defer std.testing.allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const input = root.object.get("input") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("hello \"world\"\nnewline", input.string);
+}
+
+test "parseOllamaResponse valid" {
+    const json =
+        \\{"embeddings":[[0.1,0.2,0.3]]}
+    ;
+    const result = try parseOllamaResponse(std.testing.allocator, json);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expect(@abs(result[0] - 0.1) < 0.001);
+    try std.testing.expect(@abs(result[1] - 0.2) < 0.001);
+    try std.testing.expect(@abs(result[2] - 0.3) < 0.001);
+}
+
+test "parseOllamaResponse empty outer array" {
+    const json =
+        \\{"embeddings":[]}
+    ;
+    const result = parseOllamaResponse(std.testing.allocator, json);
+    try std.testing.expectError(error.InvalidEmbeddingResponse, result);
+}
+
+test "parseOllamaResponse missing embeddings" {
+    const json =
+        \\{"error":"model not found"}
+    ;
+    const result = parseOllamaResponse(std.testing.allocator, json);
+    try std.testing.expectError(error.InvalidEmbeddingResponse, result);
+}
+
+test "parseOllamaResponse integer values" {
+    const json =
+        \\{"embeddings":[[1,2,3]]}
+    ;
+    const result = try parseOllamaResponse(std.testing.allocator, json);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expect(@abs(result[0] - 1.0) < 0.001);
+}
+
+test "parseOllamaResponse empty inner array" {
+    const json =
+        \\{"embeddings":[[]]}
+    ;
+    const result = try parseOllamaResponse(std.testing.allocator, json);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}

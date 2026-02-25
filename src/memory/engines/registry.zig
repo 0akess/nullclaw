@@ -8,7 +8,10 @@ const std = @import("std");
 const build_options = @import("build_options");
 const config_types = @import("../../config_types.zig");
 const root = @import("../root.zig");
+const memory_lru = @import("memory_lru.zig");
 const pg = if (build_options.enable_postgres) @import("postgres.zig") else struct {};
+const redis_engine = @import("redis.zig");
+const lancedb_engine = @import("lancedb.zig");
 
 // ── Capability & descriptor types ────────────────────────────────
 
@@ -71,6 +74,33 @@ const base_backends = [_]BackendDescriptor{
         .needs_db_path = true,
         .needs_workspace = true,
         .create = &createLucid,
+    },
+    .{
+        .name = "memory",
+        .label = "In-memory LRU — no persistence, ideal for testing",
+        .auto_save_default = false,
+        .capabilities = .{ .supports_keyword_rank = false, .supports_session_store = false, .supports_transactions = false, .supports_outbox = false },
+        .needs_db_path = false,
+        .needs_workspace = false,
+        .create = &createMemoryLru,
+    },
+    .{
+        .name = "redis",
+        .label = "Redis — distributed in-memory store with optional TTL",
+        .auto_save_default = true,
+        .capabilities = .{ .supports_keyword_rank = false, .supports_session_store = false, .supports_transactions = false, .supports_outbox = false },
+        .needs_db_path = false,
+        .needs_workspace = false,
+        .create = &createRedis,
+    },
+    .{
+        .name = "lancedb",
+        .label = "LanceDB — SQLite + vector-augmented recall",
+        .auto_save_default = true,
+        .capabilities = .{ .supports_keyword_rank = false, .supports_session_store = false, .supports_transactions = false, .supports_outbox = false },
+        .needs_db_path = true,
+        .needs_workspace = false,
+        .create = &createLanceDb,
     },
     .{
         .name = "none",
@@ -163,6 +193,29 @@ fn createLucid(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInstanc
     return .{ .memory = impl_.memory(), .session_store = impl_.sessionStore() };
 }
 
+fn createMemoryLru(allocator: std.mem.Allocator, _: BackendConfig) !BackendInstance {
+    const impl_ = try allocator.create(memory_lru.InMemoryLruMemory);
+    impl_.* = memory_lru.InMemoryLruMemory.init(allocator, 1000);
+    impl_.owns_self = true;
+    return .{ .memory = impl_.memory(), .session_store = null };
+}
+
+fn createRedis(allocator: std.mem.Allocator, _: BackendConfig) !BackendInstance {
+    const impl_ = try allocator.create(redis_engine.RedisMemory);
+    errdefer allocator.destroy(impl_);
+    impl_.* = try redis_engine.RedisMemory.init(allocator, .{});
+    impl_.owns_self = true;
+    return .{ .memory = impl_.memory(), .session_store = null };
+}
+
+fn createLanceDb(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInstance {
+    const impl_ = try allocator.create(lancedb_engine.LanceDbMemory);
+    errdefer allocator.destroy(impl_);
+    impl_.* = try lancedb_engine.LanceDbMemory.init(allocator, cfg.db_path.?, null, .{});
+    impl_.owns_self = true;
+    return .{ .memory = impl_.memory(), .session_store = null };
+}
+
 fn createNone(allocator: std.mem.Allocator, _: BackendConfig) !BackendInstance {
     const impl_ = try allocator.create(root.NoneMemory);
     impl_.* = root.NoneMemory.init();
@@ -183,7 +236,7 @@ fn createPostgres(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInst
 // ── Tests ────────────────────────────────────────────────────────
 
 test "registry length" {
-    const expected: usize = if (build_options.enable_postgres) 5 else 4;
+    const expected: usize = if (build_options.enable_postgres) 8 else 7;
     try std.testing.expectEqual(expected, all.len);
 }
 
@@ -228,8 +281,28 @@ test "findBackend none" {
     try std.testing.expect(!desc.auto_save_default);
 }
 
+test "findBackend redis" {
+    const desc = findBackend("redis") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("redis", desc.name);
+    try std.testing.expect(!desc.capabilities.supports_keyword_rank);
+    try std.testing.expect(!desc.capabilities.supports_session_store);
+    try std.testing.expect(!desc.needs_db_path);
+    try std.testing.expect(!desc.needs_workspace);
+    try std.testing.expect(desc.auto_save_default);
+}
+
+test "findBackend lancedb" {
+    const desc = findBackend("lancedb") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("lancedb", desc.name);
+    try std.testing.expect(!desc.capabilities.supports_keyword_rank);
+    try std.testing.expect(!desc.capabilities.supports_session_store);
+    try std.testing.expect(desc.needs_db_path);
+    try std.testing.expect(!desc.needs_workspace);
+    try std.testing.expect(desc.auto_save_default);
+}
+
 test "findBackend unknown returns null" {
-    try std.testing.expect(findBackend("redis") == null);
+    try std.testing.expect(findBackend("nonexistent") == null);
 }
 
 test "findBackend empty returns null" {
