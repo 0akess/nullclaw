@@ -50,6 +50,14 @@ const WorkspaceOnboardingState = struct {
     }
 };
 
+const OPENCLAW_AGENTS_TEMPLATE = @embedFile("workspace_templates/AGENTS.md");
+const OPENCLAW_SOUL_TEMPLATE = @embedFile("workspace_templates/SOUL.md");
+const OPENCLAW_TOOLS_TEMPLATE = @embedFile("workspace_templates/TOOLS.md");
+const OPENCLAW_IDENTITY_TEMPLATE = @embedFile("workspace_templates/IDENTITY.md");
+const OPENCLAW_USER_TEMPLATE = @embedFile("workspace_templates/USER.md");
+const OPENCLAW_HEARTBEAT_TEMPLATE = @embedFile("workspace_templates/HEARTBEAT.md");
+const OPENCLAW_BOOTSTRAP_TEMPLATE = @embedFile("workspace_templates/BOOTSTRAP.md");
+
 // ── Project context ──────────────────────────────────────────────
 
 pub const ProjectContext = struct {
@@ -1524,6 +1532,17 @@ pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
 
 /// Create essential workspace files if they don't already exist.
 pub fn scaffoldWorkspace(allocator: std.mem.Allocator, workspace_dir: []const u8, ctx: *const ProjectContext) !void {
+    if (std.fs.path.dirname(workspace_dir)) |parent| {
+        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    std.fs.makeDirAbsolute(workspace_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
     // MEMORY.md
     const mem_tmpl = try memoryTemplate(allocator, ctx);
     defer allocator.free(mem_tmpl);
@@ -1574,11 +1593,17 @@ fn writeIfMissing(allocator: std.mem.Allocator, dir: []const u8, filename: []con
     if (std.fs.openFileAbsolute(path, .{})) |f| {
         f.close();
         return;
-    } else |_| {}
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
 
-    const file = std.fs.createFileAbsolute(path, .{}) catch return;
+    const file = std.fs.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return,
+        else => return err,
+    };
     defer file.close();
-    file.writeAll(content) catch {};
+    try file.writeAll(content);
 }
 
 fn ensureBootstrapLifecycle(
@@ -1802,7 +1827,10 @@ fn markOnboardingCompletedAt(allocator: std.mem.Allocator, state: *WorkspaceOnbo
 
 fn memoryTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\# {s}'s Memory
+        \\# MEMORY.md - Long-Term Memory
+        \\
+        \\This file stores curated, durable context for main sessions.
+        \\Prefer high-signal facts over raw logs.
         \\
         \\## User
         \\- Name: {s}
@@ -1811,103 +1839,46 @@ fn memoryTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]c
         \\## Preferences
         \\- Communication style: {s}
         \\
-    , .{ ctx.agent_name, ctx.user_name, ctx.timezone, ctx.communication_style });
+        \\## Durable facts
+        \\- Add stable preferences, decisions, and constraints here.
+        \\- Keep secrets out unless explicitly requested.
+        \\- Move noisy daily notes to memory/YYYY-MM-DD.md.
+        \\
+        \\## Agent
+        \\- Name: {s}
+        \\
+    , .{ ctx.user_name, ctx.timezone, ctx.communication_style, ctx.agent_name });
 }
 
 fn soulTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        \\# Soul
-        \\
-        \\You are {s} — a fast, lightweight AI assistant powered by nullclaw.
-        \\
-        \\## Personality
-        \\- Efficient and focused
-        \\- Prefer action over discussion
-        \\- Honest about limitations
-        \\- Respect the user's time
-        \\
-    , .{ctx.agent_name});
+    _ = ctx;
+    return allocator.dupe(u8, OPENCLAW_SOUL_TEMPLATE);
 }
 
 fn agentsTemplate() []const u8 {
-    return 
-    \\# Agent Guidelines
-    \\
-    \\## Tool Use
-    \\- Use tools when you need information or to perform actions
-    \\- Prefer reading files before modifying them
-    \\- Validate tool results before proceeding
-    \\
-    \\## Conversation
-    \\- Keep responses concise and actionable
-    \\- Show code when relevant
-    \\- Ask clarifying questions when requirements are ambiguous
-    \\
-    ;
+    return OPENCLAW_AGENTS_TEMPLATE;
 }
 
 fn toolsTemplate() []const u8 {
-    return 
-    \\# Tools Guide
-    \\
-    \\## File Operations
-    \\- Use file_read to inspect files before editing
-    \\- Use file_write for creating new files
-    \\- Use file_edit for modifying existing files (find-replace)
-    \\
-    \\## Shell
-    \\- Use shell for commands, builds, and tests
-    \\- Prefer non-destructive commands
-    \\- Be cautious with rm, overwrite, and network operations
-    \\
-    ;
+    return OPENCLAW_TOOLS_TEMPLATE;
 }
 
 fn identityTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        \\# Identity
-        \\
-        \\name: {s}
-        \\engine: nullclaw
-        \\version: 0.1.0
-        \\
-    , .{ctx.agent_name});
+    _ = ctx;
+    return allocator.dupe(u8, OPENCLAW_IDENTITY_TEMPLATE);
 }
 
 fn userTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        \\# User Profile
-        \\
-        \\- Name: {s}
-        \\- Timezone: {s}
-        \\- Style: {s}
-        \\
-    , .{ ctx.user_name, ctx.timezone, ctx.communication_style });
+    _ = ctx;
+    return allocator.dupe(u8, OPENCLAW_USER_TEMPLATE);
 }
 
 fn heartbeatTemplate() []const u8 {
-    return 
-    \\# Heartbeat
-    \\
-    \\Periodic tasks and reminders. Add items below to be checked regularly.
-    \\
-    \\## Tasks
-    \\(none configured)
-    \\
-    ;
+    return OPENCLAW_HEARTBEAT_TEMPLATE;
 }
 
 fn bootstrapTemplate() []const u8 {
-    return 
-    \\# Bootstrap
-    \\
-    \\Startup instructions executed when the agent initializes.
-    \\
-    \\## On Start
-    \\- Load workspace context
-    \\- Check for pending tasks
-    \\
-    ;
+    return OPENCLAW_BOOTSTRAP_TEMPLATE;
 }
 
 // ── Memory backend helpers ───────────────────────────────────────
@@ -2103,6 +2074,12 @@ test "scaffoldWorkspace creates files in temp dir" {
     defer std.testing.allocator.free(content);
     try std.testing.expect(content.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, content, "Memory") != null);
+
+    const agents = try tmp.dir.openFile("AGENTS.md", .{});
+    defer agents.close();
+    const agents_content = try agents.readToEndAlloc(std.testing.allocator, 16 * 1024);
+    defer std.testing.allocator.free(agents_content);
+    try std.testing.expect(std.mem.indexOf(u8, agents_content, "AGENTS.md - Your Workspace") != null);
 }
 
 test "scaffoldWorkspace is idempotent" {
@@ -2447,45 +2424,45 @@ test "wizard maps autonomy index to enum correctly" {
 test "soulTemplate contains personality" {
     const tmpl = try soulTemplate(std.testing.allocator, &ProjectContext{});
     defer std.testing.allocator.free(tmpl);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Soul") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "nullclaw") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "SOUL.md - Who You Are") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Core Truths") != null);
 }
 
 test "agentsTemplate contains guidelines" {
     const tmpl = agentsTemplate();
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Agent Guidelines") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Tool Use") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "AGENTS.md - Your Workspace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Every Session") != null);
 }
 
 test "toolsTemplate contains tool docs" {
     const tmpl = toolsTemplate();
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Tools Guide") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Shell") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "TOOLS.md - Local Notes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Skills define _how_ tools work") != null);
 }
 
 test "identityTemplate contains agent name" {
     const tmpl = try identityTemplate(std.testing.allocator, &ProjectContext{ .agent_name = "TestBot" });
     defer std.testing.allocator.free(tmpl);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "TestBot") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "nullclaw") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "IDENTITY.md - Who Am I?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "**Name:**") != null);
 }
 
 test "userTemplate contains user info" {
     const ctx = ProjectContext{ .user_name = "Alice", .timezone = "PST" };
     const tmpl = try userTemplate(std.testing.allocator, &ctx);
     defer std.testing.allocator.free(tmpl);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Alice") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "PST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "USER.md - About Your Human") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Learn about the person you're helping") != null);
 }
 
 test "heartbeatTemplate is non-empty" {
     const tmpl = heartbeatTemplate();
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Heartbeat") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "HEARTBEAT.md") != null);
 }
 
 test "bootstrapTemplate is non-empty" {
     const tmpl = bootstrapTemplate();
-    try std.testing.expect(std.mem.indexOf(u8, tmpl, "Bootstrap") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tmpl, "BOOTSTRAP.md - Hello, World") != null);
 }
 
 test "scaffoldWorkspace creates all prompt.zig files" {

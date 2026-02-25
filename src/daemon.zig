@@ -18,6 +18,7 @@ const channel_manager = @import("channel_manager.zig");
 const agent_routing = @import("agent_routing.zig");
 const channel_catalog = @import("channel_catalog.zig");
 const channel_adapters = @import("channel_adapters.zig");
+const onboard = @import("onboard.zig");
 
 const log = std.log.scoped(.daemon);
 
@@ -659,6 +660,10 @@ fn inboundDispatcherThread(
 /// shutdown is requested (Ctrl+C signal or explicit request).
 /// `host` and `port` are CLI-parsed values that override `config.gateway`.
 pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16) !void {
+    // Match OpenClaw lifecycle: ensure workspace bootstrap files exist
+    // even when users skip onboard and start runtime directly.
+    try onboard.scaffoldWorkspace(allocator, config.workspace_dir, &onboard.ProjectContext{});
+
     health.markComponentOk("daemon");
     shutdown_requested.store(false, .release);
     const has_supervised_channels = hasSupervisedChannels(config);

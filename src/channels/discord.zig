@@ -417,13 +417,22 @@ pub const DiscordChannel = struct {
 
     fn gatewayLoop(self: *DiscordChannel) void {
         while (self.running.load(.acquire)) {
-            self.runGatewayOnce() catch |err| {
-                log.warn("Discord gateway error: {}", .{err});
+            var backoff_ms: u64 = 5000;
+            self.runGatewayOnce() catch |err| switch (err) {
+                error.ShouldReconnect => {
+                    // OP7 RECONNECT is a normal control signal from Discord.
+                    // Reconnect quickly to minimize missed events.
+                    log.info("Discord gateway reconnect requested by server", .{});
+                    backoff_ms = 250;
+                },
+                else => {
+                    log.warn("Discord gateway error: {}", .{err});
+                },
             };
             if (!self.running.load(.acquire)) break;
-            // 5 second backoff between reconnects (interruptible)
+            // Backoff between reconnects (interruptible).
             var slept: u64 = 0;
-            while (slept < 5000 and self.running.load(.acquire)) {
+            while (slept < backoff_ms and self.running.load(.acquire)) {
                 std.Thread.sleep(100 * std.time.ns_per_ms);
                 slept += 100;
             }
@@ -470,17 +479,21 @@ pub const DiscordChannel = struct {
         if (self.session_id != null) {
             try self.sendResumePayload(&ws);
         } else {
+            self.sequence.store(0, .release);
             try self.sendIdentifyPayload(&ws);
         }
 
         // Main read loop
         while (self.running.load(.acquire)) {
-            const maybe_text = ws.readTextMessage() catch break;
+            const maybe_text = ws.readTextMessage() catch |err| {
+                log.warn("Discord gateway read failed: {}", .{err});
+                break;
+            };
             const text = maybe_text orelse break;
             defer self.allocator.free(text);
             self.handleGatewayMessage(&ws, text) catch |err| {
+                if (err == error.ShouldReconnect) return err;
                 log.err("Discord gateway msg error: {}", .{err});
-                if (err == error.ShouldReconnect) break;
             };
         }
     }
@@ -580,9 +593,9 @@ pub const DiscordChannel = struct {
                 if (root_val.object.get("s")) |s_val| {
                     switch (s_val) {
                         .integer => |s| {
-                            if (s > self.sequence.load(.acquire)) {
-                                self.sequence.store(s, .release);
-                            }
+                            // Sequence comes from the active gateway session and is ordered.
+                            // Always overwrite to avoid stale seq after a fresh IDENTIFY.
+                            self.sequence.store(s, .release);
                         },
                         else => {},
                     }
@@ -638,6 +651,7 @@ pub const DiscordChannel = struct {
                         self.allocator.free(u);
                         self.resume_gateway_url = null;
                     }
+                    self.sequence.store(0, .release);
                 }
 
                 // Send IDENTIFY
@@ -1196,6 +1210,26 @@ test "discord handleMessageCreate require_mention blocks unmentioned guild messa
 
     try ch.handleMessageCreate(parsed.value);
     try std.testing.expectEqual(@as(usize, 0), event_bus.inboundDepth());
+}
+
+test "discord dispatch sequence accepts lower values after session reset" {
+    var ch = DiscordChannel.init(std.testing.allocator, "token", null, false);
+    defer {
+        if (ch.session_id) |s| std.testing.allocator.free(s);
+        if (ch.resume_gateway_url) |u| std.testing.allocator.free(u);
+        if (ch.bot_user_id) |u| std.testing.allocator.free(u);
+    }
+
+    // Simulate stale sequence from an old session.
+    ch.sequence.store(42, .release);
+
+    var ws_dummy: websocket.WsClient = undefined;
+    const ready_dispatch =
+        \\{"op":0,"s":1,"t":"READY","d":{"session_id":"sess-1","resume_gateway_url":"wss://gateway.discord.gg/?v=10&encoding=json","user":{"id":"bot-1"}}}
+    ;
+    try ch.handleGatewayMessage(&ws_dummy, ready_dispatch);
+
+    try std.testing.expectEqual(@as(i64, 1), ch.sequence.load(.acquire));
 }
 
 test "discord intent bitmask guilds" {

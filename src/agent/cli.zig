@@ -17,6 +17,7 @@ const Observer = observability.Observer;
 const ObserverEvent = observability.ObserverEvent;
 const cli_mod = @import("../channels/cli.zig");
 const security = @import("../security/policy.zig");
+const onboard = @import("../onboard.zig");
 
 const Agent = @import("root.zig").Agent;
 
@@ -43,6 +44,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         Config.printValidationError(err);
         return;
     };
+
+    // Match OpenClaw lifecycle: seed workspace files on first agent run
+    // so prompts always have the expected bootstrap context.
+    try onboard.scaffoldWorkspace(allocator, cfg.workspace_dir, &onboard.ProjectContext{});
 
     var out_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&out_buf);
