@@ -2124,6 +2124,7 @@ test "slash /model switches model" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "gpt-4o") != null);
     try std.testing.expectEqualStrings("gpt-4o", agent.model_name);
+    try std.testing.expectEqualStrings("gpt-4o", agent.default_model);
     try std.testing.expectEqual(@as(u64, 128_000), agent.token_limit);
     try std.testing.expectEqual(@as(u32, 8192), agent.max_tokens);
     try std.testing.expect(!agent.has_system_prompt);
@@ -2155,6 +2156,7 @@ test "slash /model with telegram bot mention switches model" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "qianfan/custom-model") != null);
     try std.testing.expectEqualStrings("qianfan/custom-model", agent.model_name);
+    try std.testing.expectEqualStrings("qianfan/custom-model", agent.default_model);
     try std.testing.expectEqual(@as(u32, 32_768), agent.max_tokens);
 }
 

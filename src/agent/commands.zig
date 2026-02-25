@@ -90,8 +90,9 @@ fn memoryRuntimePtr(self: anytype) ?*memory_mod.MemoryRuntime {
 }
 
 fn setModelName(self: anytype, model: []const u8) !void {
+    const owned_model = try self.allocator.dupe(u8, model);
     if (self.model_name_owned) self.allocator.free(self.model_name);
-    self.model_name = try self.allocator.dupe(u8, model);
+    self.model_name = owned_model;
     self.model_name_owned = true;
 
     if (@hasField(@TypeOf(self.*), "token_limit")) {
@@ -1982,6 +1983,9 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             return try self.formatModelStatus();
         }
         try setModelName(self, cmd.arg);
+        if (@hasField(@TypeOf(self.*), "default_model")) {
+            self.default_model = self.model_name;
+        }
         invalidateSystemPromptCache(self);
         persistSelectedModelToConfig(self, cmd.arg) catch |err| {
             return try std.fmt.allocPrint(
