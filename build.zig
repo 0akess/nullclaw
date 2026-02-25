@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.2.23";
-    const minimal_memory_backends = b.option(bool, "minimal-memory-backends", "Expose only markdown/memory/none memory backends") orelse false;
+    const minimal_memory_backends = b.option(bool, "minimal-memory-backends", "Expose only markdown/api/memory/none memory backends") orelse false;
     const enable_postgres_requested = b.option(bool, "enable-postgres", "Link libpq for PostgreSQL backend (requires libpq-dev)") orelse false;
     const enable_postgres = enable_postgres_requested and !minimal_memory_backends;
 

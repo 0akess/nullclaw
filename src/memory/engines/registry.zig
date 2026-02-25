@@ -133,6 +133,7 @@ const none_backend = BackendDescriptor{
 
 const minimal_backends = [_]BackendDescriptor{
     markdown_backend,
+    api_backend,
     memory_backend,
     none_backend,
 };
@@ -331,7 +332,7 @@ fn applyPostgresConnectTimeout(
 
 test "registry length" {
     const expected: usize = if (build_options.minimal_memory_backends)
-        3
+        4
     else if (build_options.enable_postgres)
         9
     else
@@ -417,10 +418,6 @@ test "findBackend lancedb" {
 }
 
 test "findBackend api" {
-    if (build_options.minimal_memory_backends) {
-        try std.testing.expect(findBackend("api") == null);
-        return;
-    }
     const desc = findBackend("api") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("api", desc.name);
     try std.testing.expect(!desc.capabilities.supports_keyword_rank);
