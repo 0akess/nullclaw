@@ -459,6 +459,66 @@ pub const Agent = struct {
         return commands.composeFinalReply(self, base_text, reasoning_content, usage);
     }
 
+    fn shouldForceActionFollowThrough(text: []const u8) bool {
+        const ascii_patterns = [_][]const u8{
+            "i'll try",
+            "i will try",
+            "let me try",
+            "i'll check",
+            "i will check",
+            "let me check",
+            "i'll retry",
+            "i will retry",
+            "let me retry",
+            "i'll attempt",
+            "i will attempt",
+            "i'll do that now",
+            "i will do that now",
+            "doing that now",
+        };
+        inline for (ascii_patterns) |pattern| {
+            if (containsAsciiIgnoreCase(text, pattern)) return true;
+        }
+
+        const exact_patterns = [_][]const u8{
+            "сейчас попробую",
+            "Сейчас попробую",
+            "попробую снова",
+            "Попробую снова",
+            "сейчас проверю",
+            "Сейчас проверю",
+            "сейчас сделаю",
+            "Сейчас сделаю",
+            "попробую переснять",
+            "Попробую переснять",
+            "сейчас перепроверю",
+            "Сейчас перепроверю",
+            "попробую ещё раз",
+            "Попробую ещё раз",
+        };
+        inline for (exact_patterns) |pattern| {
+            if (std.mem.indexOf(u8, text, pattern) != null) return true;
+        }
+        return false;
+    }
+
+    fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0 or haystack.len < needle.len) return false;
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            var matched = true;
+            var j: usize = 0;
+            while (j < needle.len) : (j += 1) {
+                if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return true;
+        }
+        return false;
+    }
+
     fn isExecToolName(tool_name: []const u8) bool {
         return commands.isExecToolName(tool_name);
     }
@@ -696,6 +756,7 @@ pub const Agent = struct {
         defer iter_arena.deinit();
 
         var iteration: u32 = 0;
+        var forced_follow_through_count: u32 = 0;
         while (iteration < self.max_tool_iterations) : (iteration += 1) {
             _ = iter_arena.reset(.retain_capacity);
             const arena = iter_arena.allocator();
@@ -913,6 +974,30 @@ pub const Agent = struct {
             const display_text = if (parsed_text.len > 0) parsed_text else response_text;
 
             if (parsed_calls.len == 0) {
+                // Guardrail: if the model promises "I'll try/check now" but emits no
+                // tool call, force one follow-up completion to either act now or
+                // explicitly state the limitation without deferred promises.
+                if (!is_streaming and
+                    forced_follow_through_count < 2 and
+                    iteration + 1 < self.max_tool_iterations and
+                    shouldForceActionFollowThrough(display_text))
+                {
+                    try self.history.append(self.allocator, .{
+                        .role = .assistant,
+                        .content = try self.allocator.dupe(u8, display_text),
+                    });
+                    try self.history.append(self.allocator, .{
+                        .role = .user,
+                        .content = try self.allocator.dupe(u8, "SYSTEM: You just promised to take action now (for example: \"I'll try/check now\"). " ++
+                            "Do it in this turn by issuing the appropriate tool call(s). " ++
+                            "If no tool can perform it, respond with a clear limitation now and do not promise another future attempt."),
+                    });
+                    self.trimHistory();
+                    self.freeResponseFields(&response);
+                    forced_follow_through_count += 1;
+                    continue;
+                }
+
                 // No tool calls — final response
                 const base_text = if (self.context_was_compacted) blk: {
                     self.context_was_compacted = false;
@@ -1038,7 +1123,9 @@ pub const Agent = struct {
             const scrubbed_results = try providers.scrubToolOutput(arena, formatted_results);
             const with_reflection = try std.fmt.allocPrint(
                 arena,
-                "{s}\n\nReflect on the tool results above and decide your next steps. If a tool failed due to policy/permissions, do not repeat the same blocked call; explain the limitation and choose a different available tool or ask the user for permission/config change.",
+                "{s}\n\nReflect on the tool results above and decide your next steps. " ++
+                    "If a tool failed due to policy/permissions, do not repeat the same blocked call; explain the limitation and choose a different available tool or ask the user for permission/config change. " ++
+                    "If a tool failed due to a transient issue (timeout/network/rate-limit), proactively retry up to 2 times with adjusted parameters before giving up.",
                 .{scrubbed_results},
             );
             try self.history.append(self.allocator, .{
@@ -3242,4 +3329,19 @@ test "Agent streaming fields can be set" {
 
     try std.testing.expect(agent.stream_callback != null);
     try std.testing.expect(agent.stream_ctx != null);
+}
+
+test "Agent shouldForceActionFollowThrough detects english deferred promise" {
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("I'll try again with a different filename now."));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("let me check that and get back in a moment"));
+}
+
+test "Agent shouldForceActionFollowThrough detects russian deferred promise" {
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("Сейчас попробую переснять и отправить файл."));
+    try std.testing.expect(Agent.shouldForceActionFollowThrough("сейчас проверю и вернусь с результатом"));
+}
+
+test "Agent shouldForceActionFollowThrough ignores normal final answer" {
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("Вот результат: файл успешно отправлен."));
+    try std.testing.expect(!Agent.shouldForceActionFollowThrough("I cannot do that in this environment."));
 }
