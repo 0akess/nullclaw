@@ -87,6 +87,9 @@ pub fn buildSystemPrompt(
     // Tools section
     try buildToolsSection(w, ctx.tools);
 
+    // Attachment marker conventions for channel delivery.
+    try appendChannelAttachmentsSection(w);
+
     if (ctx.capabilities_section) |section| {
         try w.writeAll(section);
     }
@@ -154,6 +157,15 @@ fn buildToolsSection(w: anytype, tools: []const Tool) !void {
         });
     }
     try w.writeAll("\n");
+}
+
+fn appendChannelAttachmentsSection(w: anytype) !void {
+    try w.writeAll("## Channel Attachments\n\n");
+    try w.writeAll("- On marker-aware channels (for example Telegram), you can send real attachments by emitting markers in your final reply.\n");
+    try w.writeAll("- File/document: `[FILE:/absolute/path/to/file.ext]` or `[DOCUMENT:/absolute/path/to/file.ext]`\n");
+    try w.writeAll("- Image/video/audio/voice: `[IMAGE:/abs/path]`, `[VIDEO:/abs/path]`, `[AUDIO:/abs/path]`, `[VOICE:/abs/path]`\n");
+    try w.writeAll("- If user gives `~/...`, expand it to the absolute home path before sending.\n");
+    try w.writeAll("- Do not claim attachment sending is unavailable when these markers are supported.\n\n");
 }
 
 /// Append available skills with progressive loading.
@@ -357,6 +369,20 @@ test "buildSystemPrompt includes workspace dir" {
     defer allocator.free(prompt);
 
     try std.testing.expect(std.mem.indexOf(u8, prompt, "/my/workspace") != null);
+}
+
+test "buildSystemPrompt includes channel attachment marker guidance" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/my/workspace",
+        .model_name = "claude",
+        .tools = &.{},
+    });
+    defer allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## Channel Attachments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "[FILE:/absolute/path/to/file.ext]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Do not claim attachment sending is unavailable") != null);
 }
 
 test "buildSystemPrompt injects memory.md when MEMORY.md is absent" {

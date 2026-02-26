@@ -742,6 +742,38 @@ pub const TelegramChannel = struct {
 
     // ── Media sending ───────────────────────────────────────────────
 
+    const ResolvedAttachmentPath = struct {
+        path: []const u8,
+        owned: ?[]const u8 = null,
+
+        fn deinit(self: *const ResolvedAttachmentPath, allocator: std.mem.Allocator) void {
+            if (self.owned) |buf| allocator.free(buf);
+        }
+    };
+
+    fn resolveAttachmentPath(allocator: std.mem.Allocator, file_path: []const u8) !ResolvedAttachmentPath {
+        // Remote URL attachments are passed through as-is.
+        if (std.mem.startsWith(u8, file_path, "http://") or
+            std.mem.startsWith(u8, file_path, "https://"))
+        {
+            return .{ .path = file_path };
+        }
+
+        // Expand leading ~/ (or ~\ on Windows) so curl receives an absolute path.
+        if (file_path.len >= 2 and file_path[0] == '~' and (file_path[1] == '/' or file_path[1] == '\\')) {
+            const home = try platform.getHomeDir(allocator);
+            defer allocator.free(home);
+
+            const expanded = try std.fs.path.join(allocator, &.{ home, file_path[2..] });
+            return .{
+                .path = expanded,
+                .owned = expanded,
+            };
+        }
+
+        return .{ .path = file_path };
+    }
+
     /// Send a photo via curl multipart form POST.
     pub fn sendPhoto(self: *TelegramChannel, chat_id: []const u8, allocator: std.mem.Allocator, photo_path: []const u8, caption: ?[]const u8) !void {
         try self.sendMediaMultipart(chat_id, allocator, .image, photo_path, caption);
@@ -763,16 +795,19 @@ pub const TelegramChannel = struct {
     ) !void {
         var url_buf: [512]u8 = undefined;
         const url = try self.apiUrl(&url_buf, kind.apiMethod());
+        const resolved_file_path = try resolveAttachmentPath(allocator, file_path);
+        defer resolved_file_path.deinit(allocator);
+        const media_path = resolved_file_path.path;
 
         // Build file form field: field=@path (local files) or field=URL (remote URLs)
         var file_arg_buf: [1024]u8 = undefined;
         var file_fbs = std.io.fixedBufferStream(&file_arg_buf);
-        if (std.mem.startsWith(u8, file_path, "http://") or
-            std.mem.startsWith(u8, file_path, "https://"))
+        if (std.mem.startsWith(u8, media_path, "http://") or
+            std.mem.startsWith(u8, media_path, "https://"))
         {
-            try file_fbs.writer().print("{s}={s}", .{ kind.formField(), file_path });
+            try file_fbs.writer().print("{s}={s}", .{ kind.formField(), media_path });
         } else {
-            try file_fbs.writer().print("{s}=@{s}", .{ kind.formField(), file_path });
+            try file_fbs.writer().print("{s}=@{s}", .{ kind.formField(), media_path });
         }
         const file_arg = file_fbs.getWritten();
 
@@ -2914,6 +2949,34 @@ test "telegram sweepTempMediaFilesInDir removes only stale nullclaw temp media f
 
     const photo_stat = tmp_dir.dir.statFile("nullclaw_photo_old.jpg");
     try std.testing.expectError(error.FileNotFound, photo_stat);
+}
+
+test "telegram resolveAttachmentPath expands tilde path" {
+    const allocator = std.testing.allocator;
+    const home = try platform.getHomeDir(allocator);
+    defer allocator.free(home);
+
+    const input = if (comptime builtin.os.tag == .windows) "~\\docs\\report.txt" else "~/docs/report.txt";
+    const suffix = if (comptime builtin.os.tag == .windows) "docs\\report.txt" else "docs/report.txt";
+    const expected = try std.fs.path.join(allocator, &.{ home, suffix });
+    defer allocator.free(expected);
+
+    const resolved = try TelegramChannel.resolveAttachmentPath(allocator, input);
+    defer resolved.deinit(allocator);
+
+    try std.testing.expect(resolved.owned != null);
+    try std.testing.expectEqualStrings(expected, resolved.path);
+}
+
+test "telegram resolveAttachmentPath keeps absolute local path unchanged" {
+    const allocator = std.testing.allocator;
+    const input = if (comptime builtin.os.tag == .windows) "C:\\tmp\\a.txt" else "/tmp/a.txt";
+
+    const resolved = try TelegramChannel.resolveAttachmentPath(allocator, input);
+    defer resolved.deinit(allocator);
+
+    try std.testing.expect(resolved.owned == null);
+    try std.testing.expectEqualStrings(input, resolved.path);
 }
 
 test "telegram bot command payload includes memory and doctor commands" {

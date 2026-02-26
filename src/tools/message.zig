@@ -23,7 +23,7 @@ pub const MessageTool = struct {
     allocator: std.mem.Allocator = undefined,
 
     pub const tool_name = "message";
-    pub const tool_description = "Send a message to a channel. If channel/chat_id are omitted, sends to the current conversation.";
+    pub const tool_description = "Send a message to a channel. If channel/chat_id are omitted, sends to the current conversation. Content supports attachment markers like [FILE:/abs/path], [DOCUMENT:/abs/path], [IMAGE:/abs/path] on marker-aware channels.";
     pub const tool_params =
         \\{"type":"object","properties":{"content":{"type":"string","minLength":1,"description":"Message text to send"},"channel":{"type":"string","description":"Target channel (telegram, discord, slack, etc.). Defaults to current."},"chat_id":{"type":"string","description":"Target chat/room ID. Defaults to current."}},"required":["content"]}
     ;
