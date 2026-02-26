@@ -171,11 +171,14 @@ pub fn parseRefreshResponse(allocator: std.mem.Allocator, json_bytes: []const u8
 }
 
 /// Refresh an OAuth token using Google's OAuth2 endpoint.
-/// Returns the new access token (owned by caller) or error.
+/// Returns the refresh response (access token owned by caller) or error.
 /// Uses builtin.is_test guard to skip actual HTTP calls in tests.
-pub fn refreshOAuthToken(allocator: std.mem.Allocator, refresh_token: []const u8) ![]const u8 {
+pub fn refreshOAuthToken(allocator: std.mem.Allocator, refresh_token: []const u8) !RefreshResponse {
     if (@import("builtin").is_test) {
-        return allocator.dupe(u8, "test-refreshed-token");
+        return .{
+            .access_token = try allocator.dupe(u8, "test-refreshed-token"),
+            .expires_in = 3600,
+        };
     }
 
     // Public client credentials from the Gemini CLI (not secret)
@@ -191,8 +194,7 @@ pub fn refreshOAuthToken(allocator: std.mem.Allocator, refresh_token: []const u8
     const resp_body = root.curlPost(allocator, url, body, headers) catch return error.RefreshFailed;
     defer allocator.free(resp_body);
 
-    const resp = parseRefreshResponse(allocator, resp_body) orelse return error.RefreshFailed;
-    return resp.access_token;
+    return parseRefreshResponse(allocator, resp_body) orelse return error.RefreshFailed;
 }
 
 /// Write credentials back to ~/.gemini/oauth_creds.json.
@@ -244,15 +246,16 @@ pub fn tryLoadGeminiCliToken(allocator: std.mem.Allocator) ?GeminiCliCredentials
     if (creds.isExpired()) {
         // Attempt refresh if refresh_token is available
         if (creds.refresh_token) |rt| {
-            if (refreshOAuthToken(allocator, rt)) |new_token| {
+            if (refreshOAuthToken(allocator, rt)) |refreshed_resp| {
                 // Build refreshed credentials
                 const now = std.time.timestamp();
-                const new_expires_at = now + 3600; // Google tokens last 1 hour
+                const ttl: i64 = if (refreshed_resp.expires_in > 0) refreshed_resp.expires_in else 3600;
+                const new_expires_at = std.math.add(i64, now, ttl) catch std.math.maxInt(i64);
 
                 const refreshed = GeminiCliCredentials{
-                    .access_token = new_token,
+                    .access_token = refreshed_resp.access_token,
                     .refresh_token = allocator.dupe(u8, rt) catch {
-                        allocator.free(new_token);
+                        allocator.free(refreshed_resp.access_token);
                         allocator.free(creds.access_token);
                         if (creds.refresh_token) |r| allocator.free(r);
                         return null;
@@ -385,11 +388,11 @@ pub const GeminiProvider = struct {
 
     fn loadNonEmptyEnv(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
         if (std.process.getEnvVarOwned(allocator, name)) |value| {
+            defer allocator.free(value);
             const trimmed = std.mem.trim(u8, value, " \t\r\n");
             if (trimmed.len > 0) {
-                return value;
+                return allocator.dupe(u8, trimmed) catch null;
             }
-            allocator.free(value);
             return null;
         } else |_| {
             return null;
@@ -586,7 +589,17 @@ pub const GeminiProvider = struct {
         return "Gemini";
     }
 
-    fn deinitImpl(_: *anyopaque) void {}
+    fn deinitImpl(ptr: *anyopaque) void {
+        const self: *GeminiProvider = @ptrCast(@alignCast(ptr));
+        if (self.auth) |auth| {
+            switch (auth) {
+                .env_oauth_token => |tok| self.allocator.free(tok),
+                .oauth_token => |tok| self.allocator.free(tok),
+                else => {},
+            }
+        }
+        self.auth = null;
+    }
 };
 
 /// Build a full chat request JSON body from a ChatRequest (Gemini format).
@@ -688,6 +701,7 @@ fn buildChatRequestBody(
 test "provider creates without key" {
     const p = GeminiProvider.init(std.testing.allocator, null);
     defer if (p.auth) |a| switch (a) {
+        .env_oauth_token => |tok| std.testing.allocator.free(tok),
         .oauth_token => |tok| std.testing.allocator.free(tok),
         else => {},
     };
@@ -703,6 +717,7 @@ test "provider creates with key" {
 test "provider rejects empty key" {
     const p = GeminiProvider.init(std.testing.allocator, "");
     defer if (p.auth) |a| switch (a) {
+        .env_oauth_token => |tok| std.testing.allocator.free(tok),
         .oauth_token => |tok| std.testing.allocator.free(tok),
         else => {},
     };
@@ -829,6 +844,7 @@ test "parseResponse multiple parts returns first text" {
 test "provider rejects whitespace key" {
     const p = GeminiProvider.init(std.testing.allocator, "   ");
     defer if (p.auth) |a| switch (a) {
+        .env_oauth_token => |tok| std.testing.allocator.free(tok),
         .oauth_token => |tok| std.testing.allocator.free(tok),
         else => {},
     };
@@ -1100,9 +1116,10 @@ test "parseRefreshResponse handles missing fields" {
 
 test "refreshOAuthToken returns test token in test mode" {
     const alloc = std.testing.allocator;
-    const token = try refreshOAuthToken(alloc, "test-refresh-token");
-    defer alloc.free(token);
-    try std.testing.expectEqualStrings("test-refreshed-token", token);
+    const resp = try refreshOAuthToken(alloc, "test-refresh-token");
+    defer alloc.free(resp.access_token);
+    try std.testing.expectEqualStrings("test-refreshed-token", resp.access_token);
+    try std.testing.expectEqual(@as(i64, 3600), resp.expires_in);
 }
 
 test "buildRefreshFormBody percent-encodes reserved chars" {
@@ -1126,6 +1143,28 @@ test "GeminiAuth env_oauth_token is not api key" {
     try std.testing.expect(!auth.isApiKey());
     try std.testing.expectEqualStrings("ya29.test", auth.credential());
     try std.testing.expectEqualStrings("GEMINI_OAUTH_TOKEN env var", auth.source());
+}
+
+test "provider deinit frees env_oauth_token" {
+    const alloc = std.testing.allocator;
+    var p = GeminiProvider{
+        .auth = .{ .env_oauth_token = try alloc.dupe(u8, "ya29.token") },
+        .allocator = alloc,
+    };
+    const prov = p.provider();
+    prov.deinit();
+    try std.testing.expect(p.auth == null);
+}
+
+test "provider deinit frees oauth_token" {
+    const alloc = std.testing.allocator;
+    var p = GeminiProvider{
+        .auth = .{ .oauth_token = try alloc.dupe(u8, "ya29.token") },
+        .allocator = alloc,
+    };
+    const prov = p.provider();
+    prov.deinit();
+    try std.testing.expect(p.auth == null);
 }
 
 test "writeCredentialsJson produces valid JSON" {
