@@ -389,6 +389,7 @@ pub const CronScheduler = struct {
     max_tasks: usize,
     enabled: bool,
     allocator: std.mem.Allocator,
+    shell_cwd: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, max_tasks: usize, enabled: bool) CronScheduler {
         return .{
@@ -396,7 +397,12 @@ pub const CronScheduler = struct {
             .max_tasks = max_tasks,
             .enabled = enabled,
             .allocator = allocator,
+            .shell_cwd = null,
         };
+    }
+
+    pub fn setShellCwd(self: *CronScheduler, cwd: []const u8) void {
+        self.shell_cwd = cwd;
     }
 
     pub fn deinit(self: *CronScheduler) void {
@@ -644,6 +650,7 @@ pub const CronScheduler = struct {
                     const result = std.process.Child.run(.{
                         .allocator = self.allocator,
                         .argv = &.{ platform.getShell(), platform.getShellFlag(), job.command },
+                        .cwd = self.shell_cwd,
                     }) catch |err| {
                         log.err("cron job '{s}' failed to start: {}", .{ job.id, err });
                         job.last_status = "error";
@@ -1122,6 +1129,7 @@ pub fn cliRunJob(allocator: std.mem.Allocator, id: []const u8) !void {
         const result = std.process.Child.run(.{
             .allocator = allocator,
             .argv = &.{ platform.getShell(), platform.getShellFlag(), job.command },
+            .cwd = scheduler.shell_cwd,
         }) catch |err| {
             log.err("Job '{s}' failed: {s}", .{ id, @errorName(err) });
             return;
@@ -1654,6 +1662,26 @@ test "one-shot job deleted after tick execution" {
 
     // One-shot job should have been removed
     try std.testing.expectEqual(@as(usize, 0), scheduler.listJobs().len);
+}
+
+test "shell job uses configured cwd for relative output paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
+    scheduler.setShellCwd(workspace);
+    defer scheduler.deinit();
+
+    _ = try scheduler.addOnce("1s", "echo cwd_ok > cwd_proof.txt");
+    scheduler.jobs.items[0].next_run_secs = 0;
+
+    _ = scheduler.tick(std.time.timestamp(), null);
+
+    const proof_file = try tmp.dir.openFile("cwd_proof.txt", .{});
+    proof_file.close();
 }
 
 test "shell job delivers stdout via bus" {
