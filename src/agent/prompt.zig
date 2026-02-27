@@ -420,12 +420,32 @@ fn injectPreferredMemoryFile(
     w: anytype,
     workspace_dir: []const u8,
 ) !void {
-    if (workspaceFileExists(allocator, workspace_dir, "MEMORY.md")) {
-        try injectWorkspaceFile(allocator, w, workspace_dir, "MEMORY.md");
-        return;
+    var seen_memory_paths: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var it = seen_memory_paths.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        seen_memory_paths.deinit(allocator);
     }
-    if (workspaceFileExists(allocator, workspace_dir, "memory.md")) {
-        try injectWorkspaceFile(allocator, w, workspace_dir, "memory.md");
+
+    const memory_files = [_][]const u8{ "MEMORY.md", "memory.md" };
+    for (memory_files) |filename| {
+        const path = try std.fs.path.join(allocator, &.{ workspace_dir, filename });
+        defer allocator.free(path);
+
+        const file = std.fs.openFileAbsolute(path, .{}) catch continue;
+        file.close();
+
+        const canonical = std.fs.realpathAlloc(allocator, path) catch
+            try allocator.dupe(u8, path);
+        errdefer allocator.free(canonical);
+
+        if (seen_memory_paths.contains(canonical)) {
+            allocator.free(canonical);
+            continue;
+        }
+        try seen_memory_paths.put(allocator, canonical, {});
+
+        try injectWorkspaceFile(allocator, w, workspace_dir, filename);
     }
 }
 
@@ -630,6 +650,56 @@ test "workspacePromptFingerprint changes when tracked file changes" {
     try std.testing.expect(before != after);
 }
 
+test "workspacePromptFingerprint changes when MEMORY.md changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("MEMORY.md", .{});
+        defer f.close();
+        try f.writeAll("memory-v1");
+    }
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    const before = try workspacePromptFingerprint(std.testing.allocator, workspace);
+
+    {
+        const f = try tmp.dir.createFile("MEMORY.md", .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("memory-v2-updated");
+    }
+
+    const after = try workspacePromptFingerprint(std.testing.allocator, workspace);
+    try std.testing.expect(before != after);
+}
+
+test "workspacePromptFingerprint changes when memory.md changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("memory.md", .{});
+        defer f.close();
+        try f.writeAll("alt-memory-v1");
+    }
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    const before = try workspacePromptFingerprint(std.testing.allocator, workspace);
+
+    {
+        const f = try tmp.dir.createFile("memory.md", .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("alt-memory-v2-updated");
+    }
+
+    const after = try workspacePromptFingerprint(std.testing.allocator, workspace);
+    try std.testing.expect(before != after);
+}
+
 test "workspacePromptFingerprint changes when BOOTSTRAP.md changes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -730,7 +800,7 @@ test "workspacePromptFingerprint changes when AGENTS.md changes" {
     try std.testing.expect(before != after);
 }
 
-test "buildSystemPrompt prefers MEMORY.md over memory.md" {
+test "buildSystemPrompt includes both MEMORY.md and memory.md when distinct" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -766,8 +836,8 @@ test "buildSystemPrompt prefers MEMORY.md over memory.md" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "### MEMORY.md") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "primary-memory") != null);
     if (has_distinct_case_files) {
-        try std.testing.expect(std.mem.indexOf(u8, prompt, "alt-memory") == null);
-        try std.testing.expect(std.mem.indexOf(u8, prompt, "### memory.md") == null);
+        try std.testing.expect(std.mem.indexOf(u8, prompt, "### memory.md") != null);
+        try std.testing.expect(std.mem.indexOf(u8, prompt, "alt-memory") != null);
     }
 }
 
