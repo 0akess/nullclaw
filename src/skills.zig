@@ -3046,7 +3046,9 @@ test "installSkillFromGit installs from local git repository" {
     defer freeSkills(allocator, skills);
     try std.testing.expectEqual(@as(usize, 1), skills.len);
     try std.testing.expectEqualStrings("git-install", skills[0].name);
-    try std.testing.expectEqualStrings("# Git Skill\nInstalled from git.", skills[0].instructions);
+    const normalized_instructions = try std.mem.replaceOwned(u8, allocator, skills[0].instructions, "\r\n", "\n");
+    defer allocator.free(normalized_instructions);
+    try std.testing.expectEqualStrings("# Git Skill\nInstalled from git.", normalized_instructions);
 }
 
 test "installSkillFromGit supports root markdown-only repository" {
