@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const platform = @import("../platform.zig");
 const tools_mod = @import("../tools/root.zig");
 const Tool = tools_mod.Tool;
@@ -22,6 +23,15 @@ const GuardedWorkspaceFileOpen = struct {
 fn deinitGuardedWorkspaceFile(allocator: std.mem.Allocator, opened: GuardedWorkspaceFileOpen) void {
     opened.file.close();
     allocator.free(opened.canonical_path);
+}
+
+/// Best-effort device id for fingerprint parity with OpenClaw's
+/// dev+ino+size+mtime identity tuple.
+fn workspaceFileDeviceId(file: *const std.fs.File) ?u64 {
+    if (comptime builtin.os.tag != .macos and builtin.os.tag != .linux) return null;
+
+    const stat = std.posix.fstat(file.handle) catch return null;
+    return @as(u64, @intCast(stat.dev));
 }
 
 fn pathStartsWith(path: []const u8, prefix: []const u8) bool {
@@ -146,6 +156,12 @@ pub fn workspacePromptFingerprint(
         const stat = guarded.stat;
         hasher.update("present");
         hasher.update(guarded.canonical_path);
+
+        if (workspaceFileDeviceId(&guarded.file)) |device_id| {
+            hasher.update(std.mem.asBytes(&device_id));
+        } else {
+            hasher.update("nodev");
+        }
 
         const inode_id = stat.inode;
         const mtime_ns: i128 = stat.mtime;
